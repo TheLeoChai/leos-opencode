@@ -32,6 +32,7 @@ const PRUNE_PROTECTED_TOOLS = ["skill"]
 const DEFAULT_TAIL_TURNS = 2
 const MIN_PRESERVE_RECENT_TOKENS = 2_000
 const MAX_PRESERVE_RECENT_TOKENS = 8_000
+const DEFAULT_PROACTIVE_TARGET = 0.45
 type Turn = {
   start: number
   end: number
@@ -77,11 +78,10 @@ function completedCompactions(messages: SessionV1.WithParts[]) {
   })
 }
 
-function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model }) {
-  return (
-    input.cfg.compaction?.preserve_recent_tokens ??
-    Math.min(MAX_PRESERVE_RECENT_TOKENS, Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable(input) * 0.25)))
-  )
+function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model; proactive: boolean }) {
+  if (input.cfg.compaction?.preserve_recent_tokens !== undefined) return input.cfg.compaction.preserve_recent_tokens
+  if (input.proactive) return Math.floor(usable(input) * (input.cfg.compaction?.target ?? DEFAULT_PROACTIVE_TARGET))
+  return Math.min(MAX_PRESERVE_RECENT_TOKENS, Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable(input) * 0.25)))
 }
 
 function turns(messages: SessionV1.WithParts[]) {
@@ -189,10 +189,11 @@ const layer = Layer.effect(
       messages: SessionV1.WithParts[]
       cfg: ConfigV1.Info
       model: Provider.Model
+      proactive: boolean
     }) {
       const limit = input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
       if (limit <= 0) return { head: input.messages, tail_start_id: undefined }
-      const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model })
+      const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model, proactive: input.proactive })
       const all = turns(input.messages)
       if (!all.length) return { head: input.messages, tail_start_id: undefined }
       const recent = all.slice(-limit)
@@ -338,6 +339,7 @@ const layer = Layer.effect(
         messages: history.filter((_, index) => !hidden.has(index)),
         cfg,
         model,
+        proactive: input.auto && !input.overflow,
       })
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(

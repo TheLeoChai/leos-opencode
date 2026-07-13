@@ -416,13 +416,29 @@ describe("session.compaction.isOverflow", () => {
 
   it.live(
     "returns false when input/output are within input caps",
-    provideTmpdirInstance(() =>
-      Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
-        const model = createModel({ context: 400_000, input: 272_000, output: 128_000 })
-        const tokens = { input: 200_000, output: 20_000, reasoning: 0, cache: { read: 10_000, write: 0 } }
-        expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
-      }),
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const model = createModel({ context: 400_000, input: 272_000, output: 128_000 })
+          const tokens = { input: 200_000, output: 20_000, reasoning: 0, cache: { read: 10_000, write: 0 } }
+          expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
+        }),
+      { config: { compaction: { threshold: 1 } } },
+    ),
+  )
+
+  it.live(
+    "starts automatic compaction at the configured context threshold",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const model = createModel({ context: 100_000, output: 0 })
+          const tokens = { input: 65_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+          expect(yield* compact.isOverflow({ tokens, model })).toBe(true)
+        }),
+      { config: { compaction: { threshold: 0.65 } } },
     ),
   )
 
@@ -971,6 +987,34 @@ describe("session.compaction.process", () => {
       expect(part?.type).toBe("compaction")
       expect(part?.tail_start_id).toBe(keep.id)
     }).pipe(withCompaction({ config: cfg({ tail_turns: 2, preserve_recent_tokens: 100 }) })),
+  )
+
+  itCompaction.instance(
+    "retains the proactive target budget instead of compacting the full history",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      yield* createUserMessage(session.id, "older ".repeat(200))
+      yield* createUserMessage(session.id, "middle ".repeat(200))
+      const keep = yield* createUserMessage(session.id, "recent ".repeat(200))
+      yield* createSummaryCompaction(session.id)
+
+      const msgs = yield* ssn.messages({ sessionID: session.id })
+      const parent = msgs.at(-1)?.info.id
+      expect(parent).toBeTruthy()
+      yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: true })
+
+      const part = (yield* ssn.messages({ sessionID: session.id }))
+        .flatMap((message) => message.parts)
+        .find((item): item is SessionV1.CompactionPart => item.type === "compaction")
+      expect(part?.type).toBe("compaction")
+      expect(part?.tail_start_id).toBe(keep.id)
+    }).pipe(
+      withCompaction({
+        provider: ProviderTest.fake({ model: createModel({ context: 1_000, output: 100 }) }),
+        config: cfg({ target: 0.7 }),
+      }),
+    ),
   )
 
   itCompaction.instance(
