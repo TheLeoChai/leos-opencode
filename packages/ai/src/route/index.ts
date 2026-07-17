@@ -9,7 +9,8 @@ export type {
   Interface as LLMClientShape,
   Service as LLMClientService,
 } from "./client"
-export * from "./executor"
+export { RequestExecutor, Service, fetchLayer, layer } from "./executor"
+export type { Interface } from "./executor"
 export { Auth } from "./auth"
 export { AuthOptions } from "./auth-options"
 export { Endpoint } from "./endpoint"

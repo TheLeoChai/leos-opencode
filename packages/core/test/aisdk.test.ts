@@ -1,6 +1,8 @@
 import {
   APICallError,
+  InvalidPromptError,
   InvalidResponseDataError,
+  LoadAPIKeyError,
   type LanguageModelV3,
   type LanguageModelV3CallOptions,
   type LanguageModelV3StreamPart,
@@ -8,7 +10,7 @@ import {
 import { AISDK } from "@opencode-ai/core/aisdk"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { LLM, Message } from "@opencode-ai/ai"
+import { InvalidRequestReason, LLM, LLMError, Message } from "@opencode-ai/ai"
 import { LLMClient } from "@opencode-ai/ai/route"
 import { expect } from "bun:test"
 import { Effect, Stream } from "effect"
@@ -293,6 +295,26 @@ it.effect("classifies AI SDK API failures", () =>
     const error = yield* streamFailure(
       failingLanguage(
         new APICallError({
+          message: "Bad Request",
+          url: "https://provider.test/v1",
+          requestBodyValues: {},
+          statusCode: 400,
+          responseBody: '{"error":{"code":"insufficient_quota","detail":"quota-body-secret"}}',
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "QuotaExceeded" } })
+    expect("http" in error.reason ? error.reason.http : undefined).toBeUndefined()
+    expect(JSON.stringify(error)).not.toContain("quota-body-secret")
+  }),
+)
+
+it.effect("keeps retryable quota responses terminal", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(
+        new APICallError({
           message: "Quota exceeded",
           url: "https://provider.test/v1",
           requestBodyValues: {},
@@ -303,6 +325,132 @@ it.effect("classifies AI SDK API failures", () =>
     )
 
     expect(error).toMatchObject({ reason: { _tag: "QuotaExceeded" } })
+  }),
+)
+
+it.effect("uses response bodies as transient classification evidence", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(
+        new APICallError({
+          message: "Bad Request",
+          url: "https://provider.test/v1",
+          requestBodyValues: {},
+          statusCode: 400,
+          responseBody: "Input is too long for requested model overflow-body-secret",
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "InvalidRequest", classification: "context-overflow" } })
+    expect("http" in error.reason ? error.reason.http : undefined).toBeUndefined()
+    expect(JSON.stringify(error)).not.toContain("overflow-body-secret")
+  }),
+)
+
+it.effect("honors retryable AI SDK request timeouts", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(
+        new APICallError({
+          message: "HTTP 408",
+          url: "https://provider.test/v1",
+          requestBodyValues: {},
+          statusCode: 408,
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "ProviderInternal", status: 408 } })
+  }),
+)
+
+it.effect("honors retryable AI SDK conflicts", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(
+        new APICallError({
+          message: "HTTP 409",
+          url: "https://provider.test/v1",
+          requestBodyValues: {},
+          statusCode: 409,
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "ProviderInternal", status: 409 } })
+  }),
+)
+
+it.effect("keeps semantic invalid requests terminal on retryable statuses", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(
+        new APICallError({
+          message: "Conflict",
+          url: "https://provider.test/v1",
+          requestBodyValues: {},
+          statusCode: 409,
+          responseBody: '{"error":{"code":"request_too_large"}}',
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "InvalidRequest" } })
+  }),
+)
+
+it.effect("retries unknown coded conflicts", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(
+        new APICallError({
+          message: "Conflict",
+          url: "https://provider.test/v1",
+          requestBodyValues: {},
+          statusCode: 409,
+          responseBody: '{"error":{"code":"conflict"}}',
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "ProviderInternal", status: 409 } })
+  }),
+)
+
+it.effect("preserves AI SDK retry delays without HTTP diagnostics", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(
+        new APICallError({
+          message: "Too Many Requests",
+          url: "https://provider.test/v1",
+          requestBodyValues: {},
+          statusCode: 429,
+          responseHeaders: { "Retry-After-Ms": "250" },
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "RateLimit", retryAfterMs: 250 } })
+    expect("http" in error.reason ? error.reason.http : undefined).toBeUndefined()
+  }),
+)
+
+it.effect("classifies statusless retryable API failures as transport failures", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(
+        new APICallError({
+          message: "Cannot connect to API",
+          url: "https://provider.test/v1",
+          requestBodyValues: {},
+          isRetryable: true,
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "Transport" } })
   }),
 )
 
@@ -324,6 +472,16 @@ it.effect("classifies AI SDK connection failures", () =>
   }),
 )
 
+it.effect("classifies Bun connection failures", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(Object.assign(new Error("connection refused"), { code: "ConnectionRefused" })),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "Transport", kind: "CONNECTIONREFUSED" } })
+  }),
+)
+
 it.effect("classifies structured AI SDK stream errors", () =>
   Effect.gen(function* () {
     const error = yield* streamFailure(
@@ -331,6 +489,75 @@ it.effect("classifies structured AI SDK stream errors", () =>
     )
 
     expect(error).toMatchObject({ reason: { _tag: "ProviderInternal", message: "Overloaded" } })
+  }),
+)
+
+it.effect("classifies structured stream messages without codes", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      streamingLanguage({ type: "error", error: { message: "Rate limit exceeded" } }),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "RateLimit" } })
+  }),
+)
+
+it.effect("classifies nested OpenAI Responses stream errors", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      streamingLanguage({
+        type: "error",
+        error: {
+          type: "response.failed",
+          response: { error: { code: "server_error", message: "Provider failed" } },
+        },
+      }),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "ProviderInternal", message: "Provider failed" } })
+  }),
+)
+
+it.effect("classifies numeric string stream statuses", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      streamingLanguage({ type: "error", error: { code: "503", message: "Unavailable" } }),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "ProviderInternal", status: 503 } })
+  }),
+)
+
+it.effect("classifies missing AI SDK API keys", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(new LoadAPIKeyError({ message: "API key is missing" })),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "Authentication", kind: "missing" } })
+  }),
+)
+
+it.effect("classifies invalid AI SDK prompts", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(new InvalidPromptError({ prompt: [], message: "unsupported prompt" })),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "InvalidRequest" } })
+  }),
+)
+
+it.effect("preserves existing LLM errors", () =>
+  Effect.gen(function* () {
+    const original = new LLMError({
+      module: "test",
+      method: "run",
+      reason: new InvalidRequestReason({ message: "invalid" }),
+    })
+    const error = yield* streamFailure(failingLanguage(original))
+
+    expect(error).toBe(original)
   }),
 )
 

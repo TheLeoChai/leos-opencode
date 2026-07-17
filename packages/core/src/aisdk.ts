@@ -1,38 +1,6 @@
 export * as AISDK from "./aisdk"
 
 import { makeLocationNode } from "./effect/app-node"
-import type {
-  JSONSchema7,
-  JSONValue,
-  LanguageModelV3,
-  LanguageModelV3CallOptions,
-  LanguageModelV3FinishReason,
-  LanguageModelV3FunctionTool,
-  LanguageModelV3Message,
-  LanguageModelV3Prompt,
-  LanguageModelV3StreamPart,
-  LanguageModelV3ToolChoice,
-  SharedV3ProviderOptions,
-} from "@ai-sdk/provider"
-import {
-  AuthenticationReason,
-  classifyProviderFailure,
-  FinishReason,
-  InvalidRequestReason,
-  InvalidProviderOutputReason,
-  LLMEvent,
-  LLMError,
-  Model,
-  ProviderID,
-  ProviderMetadata,
-  ToolResultValue,
-  TransportReason,
-  UnknownProviderReason,
-  type ContentPart,
-  type LLMRequest,
-  type ToolDefinition,
-  type UsageInput,
-} from "@opencode-ai/ai"
 import {
   APICallError,
   EmptyResponseBodyError,
@@ -46,7 +14,38 @@ import {
   NoSuchModelError,
   TypeValidationError,
   UnsupportedFunctionalityError,
+  type JSONSchema7,
+  type JSONValue,
+  type LanguageModelV3,
+  type LanguageModelV3CallOptions,
+  type LanguageModelV3FinishReason,
+  type LanguageModelV3FunctionTool,
+  type LanguageModelV3Message,
+  type LanguageModelV3Prompt,
+  type LanguageModelV3StreamPart,
+  type LanguageModelV3ToolChoice,
+  type SharedV3ProviderOptions,
 } from "@ai-sdk/provider"
+import {
+  AuthenticationReason,
+  classifyProviderFailure,
+  FinishReason,
+  InvalidRequestReason,
+  InvalidProviderOutputReason,
+  LLMEvent,
+  LLMError,
+  Model,
+  ProviderID,
+  ProviderInternalReason,
+  ProviderMetadata,
+  ToolResultValue,
+  TransportReason,
+  UnknownProviderReason,
+  type ContentPart,
+  type LLMRequest,
+  type ToolDefinition,
+  type UsageInput,
+} from "@opencode-ai/ai"
 import { Auth, Endpoint, type AnyRoute } from "@opencode-ai/ai/route"
 import { Cause, Context, Effect, Layer, Option, Schema, Scope, Stream } from "effect"
 import { ModelV2 } from "./model"
@@ -762,9 +761,12 @@ function llmError(method: string, error: unknown) {
       UnsupportedFunctionalityError.isInstance(error)
     )
       return new InvalidRequestReason({ message: error.message })
-    const providerCode = apiFailureCode(error)
-    if (providerCode)
-      return classifyProviderFailure({ message: apiFailureMessage(error), code: providerCode })
+    const providerReason = classifyProviderFailure({
+      message: apiFailureMessage(error),
+      code: apiFailureCode(error),
+      status: apiFailureStatus(error),
+    })
+    if (providerReason._tag !== "UnknownProvider") return providerReason
     return new UnknownProviderReason({ message: errorMessage(error) })
   })()
   return new LLMError({
@@ -780,15 +782,28 @@ function apiCallReason(error: APICallError) {
     return new InvalidProviderOutputReason({ message: malformed.message })
   const code = apiFailureCode(error.data) ?? apiFailureCode(error.responseBody)
   if (error.statusCode === undefined) {
-    if (code) return classifyProviderFailure({ message: error.message, code })
+    const reason =
+      code === undefined && error.responseBody === undefined
+        ? undefined
+        : classifyProviderFailure({ message: error.message, code, evidence: error.responseBody })
+    if (reason && reason._tag !== "UnknownProvider") return reason
     if (error.isRetryable) return new TransportReason({ message: error.message })
-    return new UnknownProviderReason({ message: error.message })
+    return reason ?? new UnknownProviderReason({ message: error.message })
   }
-  return classifyProviderFailure({
+  const retryAfter = retryAfterMs(error.responseHeaders)
+  const reason = classifyProviderFailure({
     message: error.message,
+    evidence: error.responseBody,
     status: error.statusCode,
     code,
+    retryAfterMs: retryAfter,
   })
+  if (!error.isRetryable || (reason._tag !== "UnknownProvider" && reason._tag !== "InvalidRequest")) return reason
+  if (
+    classifyProviderFailure({ message: error.message, evidence: error.responseBody, code })._tag !== "UnknownProvider"
+  )
+    return reason
+  return new ProviderInternalReason({ message: error.message, status: error.statusCode, retryAfterMs: retryAfter })
 }
 
 const TRANSPORT_TIMEOUT_CODES = new Set([
@@ -798,6 +813,8 @@ const TRANSPORT_TIMEOUT_CODES = new Set([
   "UND_ERR_HEADERS_TIMEOUT",
 ])
 const TRANSPORT_CONNECTION_CODES = new Set([
+  "CONNECTIONCLOSED",
+  "CONNECTIONREFUSED",
   "EAI_AGAIN",
   "ECONNREFUSED",
   "ECONNRESET",
@@ -805,6 +822,7 @@ const TRANSPORT_CONNECTION_CODES = new Set([
   "ENETUNREACH",
   "ENOTFOUND",
   "EPIPE",
+  "FAILEDTOOPENSOCKET",
   "UND_ERR_SOCKET",
 ])
 
@@ -822,19 +840,46 @@ function apiFailureCode(error: unknown): string | undefined {
     const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(Schema.UnknownFromJsonString)(error))
     return apiFailureCode(decoded)
   }
+  const nested = field(error, "error") ?? field(field(error, "response"), "error")
+  const nestedCode = nested === undefined || nested === error ? undefined : apiFailureCode(nested)
+  if (nestedCode) return nestedCode
   const code = field(error, "code")
-  if (typeof code === "string") return code
+  if (typeof code === "string" || typeof code === "number") return String(code)
+  const status = field(error, "status")
+  if (typeof status === "string") return status
   const type = field(error, "type")
   if (typeof type === "string" && type !== "error") return type
-  const nested = field(error, "error")
-  return nested === undefined || nested === error ? undefined : apiFailureCode(nested)
 }
 
-function apiFailureMessage(error: unknown) {
+function apiFailureMessage(error: unknown): string {
   const message = field(error, "message")
   if (typeof message === "string") return message
-  const nested = field(field(error, "error"), "message")
-  return typeof nested === "string" ? nested : String(error)
+  const nested = field(error, "error") ?? field(field(error, "response"), "error")
+  return nested === undefined || nested === error ? String(error) : apiFailureMessage(nested)
+}
+
+function apiFailureStatus(error: unknown): number | undefined {
+  const status = field(error, "status")
+  const code = field(error, "code")
+  const value = [status, code]
+    .map((value) => (typeof value === "number" ? value : typeof value === "string" ? Number(value) : undefined))
+    .find((value) => value !== undefined && Number.isInteger(value) && value >= 400 && value < 600)
+  if (value !== undefined) return value
+  const nested = field(error, "error") ?? field(field(error, "response"), "error")
+  return nested === undefined || nested === error ? undefined : apiFailureStatus(nested)
+}
+
+function retryAfterMs(headers: Record<string, string> | undefined) {
+  if (!headers) return undefined
+  const normalized = Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]))
+  const millis = Number(normalized["retry-after-ms"])
+  if (Number.isFinite(millis)) return Math.max(0, millis)
+  const value = normalized["retry-after"]
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  const date = Date.parse(value)
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now())
 }
 
 function errorMessage(error: unknown) {

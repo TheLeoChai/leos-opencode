@@ -61,8 +61,9 @@ describe("provider error classification", () => {
         '{"code":"bad_request","error":{"code":"usage_not_included"}}',
         '{"code":"bad_request","error":{"code":"server_error"}}',
         '{"code":"bad_request","error":{"type":"invalid_request_error"}}',
+        '{"type":"response.failed","response":{"error":{"code":"server_error"}}}',
       ].map((message) => classifyProviderFailure({ message })._tag),
-    ).toEqual(["QuotaExceeded", "ProviderInternal", "InvalidRequest"])
+    ).toEqual(["QuotaExceeded", "ProviderInternal", "InvalidRequest", "ProviderInternal"])
   })
 
   test("keeps unknown and malformed provider payloads non-retryable", () => {

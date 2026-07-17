@@ -69,6 +69,8 @@ const CONTENT_POLICY_TEXT = /content[-_\s]?policy|content_filter|safety/i
 
 export interface ProviderFailure {
   readonly message: string
+  /** Provider text used only for classification and never retained on the resulting reason. */
+  readonly evidence?: string | undefined
   readonly status?: number | undefined
   readonly code?: string | undefined
   readonly retryAfterMs?: number | undefined
@@ -81,10 +83,11 @@ export interface ProviderFailure {
 // session retry policy never needs provider-specific string matching.
 export function classifyProviderFailure(input: ProviderFailure): LLMError["reason"] {
   const body = input.http?.body ?? ""
-  const codes = [input.code, ...providerCodes(body), ...providerCodes(input.message)]
+  const evidence = input.evidence ?? ""
+  const codes = [input.code, ...providerCodes(body), ...providerCodes(input.message), ...providerCodes(evidence)]
     .filter((code): code is string => code !== undefined)
     .map((code) => code.toLowerCase())
-  const text = body || input.message
+  const texts = [body, input.message, evidence]
   const common = { message: input.message, providerMetadata: input.providerMetadata, http: input.http }
   const clientScoped = input.status === undefined || (input.status >= 400 && input.status < 500)
 
@@ -92,12 +95,14 @@ export function classifyProviderFailure(input: ProviderFailure): LLMError["reaso
     clientScoped &&
     (codes.includes("context_length_exceeded") ||
       codes.includes("model_context_window_exceeded") ||
-      isContextOverflow(body) ||
-      isContextOverflow(input.message))
+      texts.some(isContextOverflow))
   )
     return new InvalidRequestReason({ ...common, classification: "context-overflow" })
-  if (CONTENT_POLICY_TEXT.test(text)) return new ContentPolicyReason(common)
-  if (codes.some((code) => QUOTA_CODES.has(code)) || (input.status === 429 && QUOTA_TEXT.test(text)))
+  if (texts.some((text) => CONTENT_POLICY_TEXT.test(text))) return new ContentPolicyReason(common)
+  if (
+    codes.some((code) => QUOTA_CODES.has(code)) ||
+    (input.status === 429 && texts.some((text) => QUOTA_TEXT.test(text)))
+  )
     return new QuotaExceededReason(common)
   if (input.status === 401) return new AuthenticationReason({ ...common, kind: "invalid" })
   if (input.status === 403) return new AuthenticationReason({ ...common, kind: "insufficient-permissions" })
@@ -112,7 +117,7 @@ export function classifyProviderFailure(input: ProviderFailure): LLMError["reaso
       retryAfterMs: input.retryAfterMs,
       rateLimit: input.rateLimit,
     })
-  if (RATE_LIMIT_TEXT.test(text))
+  if (texts.some((text) => RATE_LIMIT_TEXT.test(text)))
     return new RateLimitReason({
       ...common,
       retryAfterMs: input.retryAfterMs,
@@ -153,7 +158,10 @@ function providerCodes(value: string) {
   const decoded = Option.getOrUndefined(decodeJson(value))
   if (!isRecord(decoded)) return []
   const error = isRecord(decoded.error) ? decoded.error : undefined
-  return [decoded.code, error?.code, error?.type].filter((value): value is string => typeof value === "string")
+  const response = isRecord(decoded.response) ? decoded.response : undefined
+  const responseError = isRecord(response?.error) ? response.error : undefined
+  return [decoded.code, decoded.status, error?.code, error?.type, error?.status, responseError?.code, responseError?.type]
+    .filter((value): value is string => typeof value === "string")
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
