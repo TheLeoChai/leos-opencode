@@ -288,31 +288,21 @@ it.effect("projects replay metadata onto AI SDK prompt parts", () =>
   }),
 )
 
-it.effect("classifies AI SDK API failures with redacted diagnostics", () =>
+it.effect("classifies AI SDK API failures", () =>
   Effect.gen(function* () {
     const error = yield* streamFailure(
       failingLanguage(
         new APICallError({
           message: "Quota exceeded",
-          url: "https://provider.test/v1?key=url-secret",
+          url: "https://provider.test/v1",
           requestBodyValues: {},
           statusCode: 429,
-          responseHeaders: { "retry-after-ms": "250", "x-api-key": "header-secret" },
-          responseBody: '{"error":{"code":"insufficient_quota","api_key":"body-secret"}}',
+          responseBody: '{"error":{"code":"insufficient_quota"}}',
         }),
       ),
     )
 
-    expect(error).toMatchObject({
-      reason: {
-        _tag: "QuotaExceeded",
-        http: {
-          request: { url: "https://provider.test/v1?key=%3Credacted%3E" },
-          response: { headers: { "x-api-key": "<redacted>" } },
-          body: '{"error":{"code":"insufficient_quota","api_key":"<redacted>"}}',
-        },
-      },
-    })
+    expect(error).toMatchObject({ reason: { _tag: "QuotaExceeded" } })
   }),
 )
 

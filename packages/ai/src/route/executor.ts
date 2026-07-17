@@ -47,14 +47,15 @@ const isSensitiveHeaderName = (name: string) => SENSITIVE_NAME.test(name)
 
 const isSensitiveQueryName = (name: string) => isSensitiveHeaderName(name) || SHORT_QUERY_NAME.test(name)
 
-export const redactHeaders = (headers: Headers.Input, redactedNames: ReadonlyArray<string | RegExp> = []) =>
+const redactHeaders = (headers: Headers.Headers, redactedNames: ReadonlyArray<string | RegExp>) =>
   Object.fromEntries(
-    Object.entries(Headers.redact(Headers.fromInput(headers), [...redactedNames, SENSITIVE_NAME])).map(
-      ([name, value]) => [name, String(value)],
-    ),
+    Object.entries(Headers.redact(headers, [...redactedNames, SENSITIVE_NAME])).map(([name, value]) => [
+      name,
+      String(value),
+    ]),
   )
 
-export const redactUrl = (value: string) => {
+const redactUrl = (value: string) => {
   if (!URL.canParse(value)) return REDACTED
   const url = new URL(value)
   url.searchParams.forEach((_, key) => {
@@ -150,12 +151,7 @@ const responseDetails = (
     headers: redactHeaders(response.headers, redactedNames),
   })
 
-interface RedactionRequest {
-  readonly url: string
-  readonly headers: Headers.Input
-}
-
-const secretValues = (request: RedactionRequest) => {
+const secretValues = (request: HttpClientRequest.HttpClientRequest) => {
   const values = new Set<string>()
   const add = (value: string) => {
     if (value.length < 4) return
@@ -180,13 +176,13 @@ const secretValues = (request: RedactionRequest) => {
 // Two passes: structural (redact `"name": "value"` and `name=value` patterns
 // for any field name that looks sensitive) plus literal (replace any actual
 // secret values we sent in the request, in case the response echoes one back).
-const redactBody = (body: string, request: RedactionRequest) =>
+const redactBody = (body: string, request: HttpClientRequest.HttpClientRequest) =>
   Array.from(secretValues(request)).reduce(
     (text, secret) => text.split(secret).join(REDACTED),
     body.replace(REDACT_JSON_FIELD, `$1"${REDACTED}"`).replace(REDACT_QUERY_FIELD, `$1${REDACTED}`),
   )
 
-export const redactResponseBody = (body: string | void, request: RedactionRequest) => {
+const responseBody = (body: string | void, request: HttpClientRequest.HttpClientRequest) => {
   if (body === undefined) return {}
   const redacted = redactBody(body, request)
   if (redacted.length <= BODY_LIMIT) return { body: redacted }
@@ -202,7 +198,7 @@ const responseHttp = (input: {
   readonly request: HttpClientRequest.HttpClientRequest
   readonly response: HttpClientResponse.HttpClientResponse
   readonly redactedNames: ReadonlyArray<string | RegExp>
-  readonly body: ReturnType<typeof redactResponseBody>
+  readonly body: ReturnType<typeof responseBody>
   readonly requestId?: string | undefined
   readonly rateLimit?: HttpRateLimitDetails | undefined
 }) =>
@@ -223,7 +219,7 @@ const statusError =
       const headers = normalizedHeaders(response.headers)
       const retryAfter = retryAfterMs(headers)
       const rateLimit = rateLimitDetails(headers, retryAfter)
-      const details = redactResponseBody(body, request)
+      const details = responseBody(body, request)
       return yield* new LLMError({
         module: "RequestExecutor",
         method: "execute",

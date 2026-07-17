@@ -18,9 +18,6 @@ import {
   AuthenticationReason,
   classifyProviderFailure,
   FinishReason,
-  HttpContext,
-  HttpRequestDetails,
-  HttpResponseDetails,
   InvalidRequestReason,
   InvalidProviderOutputReason,
   LLMEvent,
@@ -50,7 +47,7 @@ import {
   TypeValidationError,
   UnsupportedFunctionalityError,
 } from "@ai-sdk/provider"
-import { Auth, Endpoint, RequestExecutor, type AnyRoute } from "@opencode-ai/ai/route"
+import { Auth, Endpoint, type AnyRoute } from "@opencode-ai/ai/route"
 import { Cause, Context, Effect, Layer, Option, Schema, Scope, Stream } from "effect"
 import { ModelV2 } from "./model"
 import { ProviderV2 } from "./provider"
@@ -784,27 +781,13 @@ function apiCallReason(error: APICallError) {
   const code = apiFailureCode(error.data) ?? apiFailureCode(error.responseBody)
   if (error.statusCode === undefined) {
     if (code) return classifyProviderFailure({ message: error.message, code })
-    if (error.isRetryable)
-      return new TransportReason({ message: error.message, url: RequestExecutor.redactUrl(error.url) })
+    if (error.isRetryable) return new TransportReason({ message: error.message })
     return new UnknownProviderReason({ message: error.message })
   }
-  const body = RequestExecutor.redactResponseBody(error.responseBody, {
-    url: error.url,
-    headers: error.responseHeaders ?? {},
-  })
   return classifyProviderFailure({
     message: error.message,
     status: error.statusCode,
     code,
-    retryAfterMs: retryAfterMs(error.responseHeaders),
-    http: new HttpContext({
-      request: new HttpRequestDetails({ method: "POST", url: RequestExecutor.redactUrl(error.url), headers: {} }),
-      response: new HttpResponseDetails({
-        status: error.statusCode,
-        headers: RequestExecutor.redactHeaders(error.responseHeaders ?? {}),
-      }),
-      ...body,
-    }),
   })
 }
 
@@ -824,18 +807,6 @@ const TRANSPORT_CONNECTION_CODES = new Set([
   "EPIPE",
   "UND_ERR_SOCKET",
 ])
-
-function retryAfterMs(headers: Record<string, string> | undefined) {
-  if (!headers) return undefined
-  const millis = Number(headers["retry-after-ms"])
-  if (Number.isFinite(millis)) return Math.max(0, millis)
-  const value = headers["retry-after"]
-  if (!value) return undefined
-  const seconds = Number(value)
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
-  const date = Date.parse(value)
-  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now())
-}
 
 function field(error: unknown, name: string) {
   return typeof error === "object" && error !== null ? Reflect.get(error, name) : undefined
