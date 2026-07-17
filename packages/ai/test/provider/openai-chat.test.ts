@@ -92,6 +92,73 @@ describe("OpenAI Chat route", () => {
     }),
   )
 
+  it.effect("replays provider reasoning fields and structured details", () =>
+    Effect.gen(function* () {
+      const prepared = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(
+        LLM.request({
+          model,
+          messages: [
+            Message.assistant([
+              {
+                type: "reasoning",
+                text: "thinking",
+                providerMetadata: {
+                  openai: {
+                    reasoningField: "reasoning_text",
+                    reasoningDetails: [{ type: "reasoning.text", text: "thinking", id: "reasoning-1" }],
+                  },
+                },
+              },
+              ToolCallPart.make({
+                id: "call_1",
+                name: "lookup",
+                input: { query: "weather" },
+                providerMetadata: {
+                  openai: {
+                    reasoningDetails: [
+                      {
+                        type: "reasoning.encrypted",
+                        id: "call_1",
+                        data: "opaque",
+                        format: "unknown",
+                        provider_field: "preserved",
+                      },
+                    ],
+                  },
+                },
+              }),
+            ]),
+          ],
+        }),
+      )
+
+      expect(prepared.body.messages).toEqual([
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "lookup", arguments: '{"query":"weather"}' },
+            },
+          ],
+          reasoning_text: "thinking",
+          reasoning_details: [
+            { type: "reasoning.text", text: "thinking", id: "reasoning-1" },
+            {
+              type: "reasoning.encrypted",
+              id: "call_1",
+              data: "opaque",
+              format: "unknown",
+              provider_field: "preserved",
+            },
+          ],
+        },
+      ])
+    }),
+  )
+
   it.effect("maps OpenAI provider options to Chat options", () =>
     Effect.gen(function* () {
       const prepared = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(
@@ -540,22 +607,72 @@ describe("OpenAI Chat route", () => {
     }),
   )
 
-  it.effect("parses OpenAI-compatible reasoning content deltas", () =>
+  it.effect("parses OpenAI-compatible reasoning deltas", () =>
     Effect.gen(function* () {
       const body = sseEvents(
         { choices: [{ delta: { reasoning_content: "thinking" } }] },
+        { choices: [{ delta: { reasoning: " more" } }] },
+        { choices: [{ delta: { reasoning_text: " deeply" } }] },
+        {
+          choices: [
+            {
+              delta: {
+                reasoning_details: [
+                  { type: "reasoning.text", text: " about", index: 0 },
+                  { type: "reasoning.summary", summary: " this", index: 1 },
+                  { type: "reasoning.encrypted", data: "opaque" },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: {
+                reasoning_details: [
+                  {
+                    type: "reasoning.text",
+                    text: "",
+                    signature: "signature",
+                    format: "anthropic-claude-v1",
+                    index: 0,
+                  },
+                ],
+              },
+            },
+          ],
+        },
         { choices: [{ delta: { content: "Hello" } }] },
         { choices: [{ delta: {}, finish_reason: "stop" }] },
       )
 
       const response = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(body)))
 
-      expect(response.reasoning).toBe("thinking")
+      expect(response.reasoning).toBe("thinking more deeply about this")
       expect(response.text).toBe("Hello")
+      expect(response.message.content.find((part) => part.type === "reasoning")?.providerMetadata).toMatchObject({
+        openai: {
+          reasoningDetails: [
+            {
+              type: "reasoning.text",
+              text: " about",
+              signature: "signature",
+              format: "anthropic-claude-v1",
+              index: 0,
+            },
+            { type: "reasoning.summary", summary: " this", index: 1 },
+            { type: "reasoning.encrypted", data: "opaque" },
+          ],
+        },
+      })
       expect(response.events).toMatchObject([
         { type: "step-start", index: 0 },
         { type: "reasoning-start", id: "reasoning-0" },
         { type: "reasoning-delta", id: "reasoning-0", text: "thinking" },
+        { type: "reasoning-delta", id: "reasoning-0", text: " more" },
+        { type: "reasoning-delta", id: "reasoning-0", text: " deeply" },
+        { type: "reasoning-delta", id: "reasoning-0", text: " about this" },
         { type: "reasoning-end", id: "reasoning-0" },
         { type: "text-start", id: "text-0" },
         { type: "text-delta", id: "text-0", text: "Hello" },
@@ -563,6 +680,72 @@ describe("OpenAI Chat route", () => {
         { type: "step-finish", index: 0, reason: "stop" },
         { type: "finish", reason: "stop" },
       ])
+    }),
+  )
+
+  it.effect("preserves encrypted reasoning details on the first tool call", () =>
+    Effect.gen(function* () {
+      const body = sseEvents(
+        {
+          choices: [
+            {
+              delta: {
+                reasoning_details: [{ type: "reasoning.encrypted", data: "opaque", format: "unknown" }],
+              },
+            },
+          ],
+        },
+        deltaChunk({
+          role: "assistant",
+          tool_calls: [{ index: 0, id: "call_1", function: { name: "lookup", arguments: "{}" } }],
+        }),
+        deltaChunk({}, "tool_calls"),
+      )
+      const response = yield* LLMClient.generate(
+        LLM.updateRequest(request, {
+          tools: [{ name: "lookup", description: "Lookup data", inputSchema: { type: "object" } }],
+        }),
+      ).pipe(Effect.provide(fixedResponse(body)))
+
+      expect(response.events.find(LLMEvent.is.toolCall)).toMatchObject({
+        providerMetadata: {
+          openai: {
+            reasoningDetails: [{ type: "reasoning.encrypted", data: "opaque", format: "unknown" }],
+          },
+        },
+      })
+    }),
+  )
+
+  it.effect("merges identity-less reasoning detail signatures", () =>
+    Effect.gen(function* () {
+      const body = sseEvents(
+        { choices: [{ delta: { reasoning_details: [{ type: "reasoning.text", text: "think" }] } }] },
+        { choices: [{ delta: { reasoning_details: [{ type: "reasoning.text", text: "ing" }] } }] },
+        {
+          choices: [
+            {
+              delta: {
+                reasoning_details: [
+                  { type: "reasoning.text", text: "", signature: "signature", format: "anthropic-claude-v1" },
+                ],
+              },
+            },
+          ],
+        },
+        { choices: [{ delta: { content: "Hello" } }] },
+        { choices: [{ delta: {}, finish_reason: "stop" }] },
+      )
+      const response = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(body)))
+
+      expect(response.reasoning).toBe("thinking")
+      expect(response.message.content.find((part) => part.type === "reasoning")?.providerMetadata).toMatchObject({
+        openai: {
+          reasoningDetails: [
+            { type: "reasoning.text", text: "thinking", signature: "signature", format: "anthropic-claude-v1" },
+          ],
+        },
+      })
     }),
   )
 

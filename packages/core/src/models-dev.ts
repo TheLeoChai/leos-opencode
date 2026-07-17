@@ -35,6 +35,7 @@ type ReasoningOption =
   | { readonly type: "budget_tokens"; readonly min?: number; readonly max?: number }
 
 type Modality = "text" | "audio" | "image" | "video" | "pdf"
+type InterleavedField = "reasoning" | "reasoning_content" | "reasoning_text" | "reasoning_details" | (string & {})
 
 type SourceModel = {
   readonly id: string
@@ -46,7 +47,7 @@ type SourceModel = {
   readonly reasoning_options?: readonly ReasoningOption[]
   readonly temperature?: boolean
   readonly tool_call: boolean
-  readonly interleaved?: true | { readonly field: "reasoning" | "reasoning_content" | "reasoning_details" }
+  readonly interleaved?: true | { readonly field: InterleavedField }
   readonly cost?: Cost
   readonly limit: { readonly context: number; readonly input?: number; readonly output: number }
   readonly modalities?: { readonly input: readonly Modality[]; readonly output: readonly Modality[] }

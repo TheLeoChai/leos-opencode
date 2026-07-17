@@ -56,6 +56,8 @@ const OpenAIChatAssistantToolCall = Schema.Struct({
 })
 type OpenAIChatAssistantToolCall = Schema.Schema.Type<typeof OpenAIChatAssistantToolCall>
 
+type OpenAIChatReasoningDetail = Schema.Schema.Type<typeof JsonObject>
+
 const OpenAIChatUserContent = Schema.Union([
   Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
   Schema.Struct({
@@ -75,6 +77,9 @@ const OpenAIChatMessage = Schema.Union([
     content: Schema.NullOr(Schema.String),
     tool_calls: optionalArray(OpenAIChatAssistantToolCall),
     reasoning_content: Schema.optional(Schema.String),
+    reasoning: Schema.optional(Schema.String),
+    reasoning_text: Schema.optional(Schema.String),
+    reasoning_details: optionalArray(JsonObject),
   }),
   Schema.Struct({ role: Schema.Literal("tool"), tool_call_id: Schema.String, content: Schema.String }),
 ]).pipe(Schema.toTaggedUnion("role"))
@@ -145,6 +150,9 @@ type OpenAIChatToolCallDelta = Schema.Schema.Type<typeof OpenAIChatToolCallDelta
 const OpenAIChatDelta = Schema.Struct({
   content: optionalNull(Schema.String),
   reasoning_content: optionalNull(Schema.String),
+  reasoning: optionalNull(Schema.String),
+  reasoning_text: optionalNull(Schema.String),
+  reasoning_details: optionalNull(Schema.Array(JsonObject)),
   tool_calls: optionalNull(Schema.Array(OpenAIChatToolCallDelta)),
 })
 
@@ -166,6 +174,8 @@ export interface ParserState {
   readonly usage?: Usage
   readonly finishReason?: FinishReason
   readonly lifecycle: Lifecycle.State
+  readonly reasoningDetails: ReadonlyArray<OpenAIChatReasoningDetail>
+  readonly reasoningField?: NonNullable<ReturnType<typeof reasoningDelta>>["field"]
 }
 
 // =============================================================================
@@ -208,6 +218,27 @@ const lowerMedia = Effect.fn("OpenAIChat.lowerMedia")(function* (part: MediaPart
 const openAICompatibleReasoningContent = (native: unknown) =>
   isRecord(native) && typeof native.reasoning_content === "string" ? native.reasoning_content : undefined
 
+const reasoningState = (part: ReasoningPart | ToolCallPart) => {
+  const state = part.providerMetadata?.openai
+  return isRecord(state) ? state : undefined
+}
+
+const reasoningField = (part: ReasoningPart) => {
+  const field = reasoningState(part)?.reasoningField
+  if (
+    field === "reasoning" ||
+    field === "reasoning_content" ||
+    field === "reasoning_text" ||
+    field === "reasoning_details"
+  )
+    return field
+}
+
+const reasoningDetails = (part: ReasoningPart | ToolCallPart) => {
+  const details = reasoningState(part)?.reasoningDetails
+  return Array.isArray(details) ? details.filter(isRecord) : []
+}
+
 const lowerUserMessage = Effect.fn("OpenAIChat.lowerUserMessage")(function* (message: OpenAIChatRequestMessage) {
   const content: Array<Schema.Schema.Type<typeof OpenAIChatUserContent>> = []
   for (const part of message.content) {
@@ -248,14 +279,24 @@ const lowerAssistantMessage = Effect.fn("OpenAIChat.lowerAssistantMessage")(func
       continue
     }
   }
+  const text = reasoning.map((part) => part.text).join("")
+  const field = reasoning.map(reasoningField).find((item) => item !== undefined) ?? "reasoning_content"
+  const details = message.content.flatMap((part) =>
+    part.type === "reasoning" || part.type === "tool-call" ? reasoningDetails(part) : [],
+  )
   return {
     role: "assistant" as const,
     content: content.length === 0 ? null : ProviderShared.joinText(content),
     tool_calls: toolCalls.length === 0 ? undefined : toolCalls,
     reasoning_content:
-      reasoning.length > 0
-        ? reasoning.map((part) => part.text).join("")
-        : openAICompatibleReasoningContent(message.native?.openaiCompatible),
+      reasoning.length === 0
+        ? openAICompatibleReasoningContent(message.native?.openaiCompatible)
+        : field === "reasoning_content"
+          ? text
+          : undefined,
+    reasoning: reasoning.length > 0 && field === "reasoning" ? text : undefined,
+    reasoning_text: reasoning.length > 0 && field === "reasoning_text" ? text : undefined,
+    reasoning_details: details.length > 0 ? details : undefined,
   }
 })
 
@@ -400,6 +441,97 @@ const mapUsage = (usage: OpenAIChatEvent["usage"]): Usage | undefined => {
   })
 }
 
+const reasoningDelta = (delta: Schema.Schema.Type<typeof OpenAIChatDelta> | null | undefined) => {
+  if (delta?.reasoning_content) return { field: "reasoning_content", text: delta.reasoning_content } as const
+  if (delta?.reasoning) return { field: "reasoning", text: delta.reasoning } as const
+  if (delta?.reasoning_text) return { field: "reasoning_text", text: delta.reasoning_text } as const
+  const text = delta?.reasoning_details
+    ?.flatMap((detail) => {
+      if (detail.type === "reasoning.text" && typeof detail.text === "string" && detail.text) return [detail.text]
+      if (detail.type === "reasoning.summary" && typeof detail.summary === "string" && detail.summary)
+        return [detail.summary]
+      return []
+    })
+    .join("")
+  return text ? ({ field: "reasoning_details", text } as const) : undefined
+}
+
+const reasoningMetadata = (
+  field: NonNullable<ReturnType<typeof reasoningDelta>>["field"],
+  details: ReadonlyArray<OpenAIChatReasoningDetail>,
+) => ({
+  openai: {
+    reasoningField: field,
+    ...(details.length > 0 ? { reasoningDetails: details } : {}),
+  },
+})
+
+const withEncryptedReasoningDetails = (
+  events: ReadonlyArray<LLMEvent>,
+  details: ReadonlyArray<OpenAIChatReasoningDetail>,
+) => {
+  const encrypted = details.filter(
+    (detail) => detail.type === "reasoning.encrypted" && typeof detail.data === "string" && detail.data,
+  )
+  let attached = false
+  return events.map((event) => {
+    if (event.type !== "tool-call" || attached || encrypted.length === 0) return event
+    attached = true
+    const current = event.providerMetadata?.openai
+    return LLMEvent.toolCall({
+      ...event,
+      providerMetadata: {
+        ...event.providerMetadata,
+        openai: { ...(isRecord(current) ? current : {}), reasoningDetails: encrypted },
+      },
+    })
+  })
+}
+
+const mergeReasoningDetails = (
+  current: ReadonlyArray<OpenAIChatReasoningDetail>,
+  incoming: ReadonlyArray<OpenAIChatReasoningDetail>,
+) => {
+  const result = [...current]
+  for (const detail of incoming) {
+    let index = result.findIndex((item) => {
+      if (item.type !== detail.type) return false
+      if (typeof item.id === "string" && typeof detail.id === "string") return item.id === detail.id
+      return typeof detail.index === "number" && item.index === detail.index
+    })
+    if (index === -1 && typeof detail.id !== "string" && typeof detail.index !== "number") {
+      const last = result.length - 1
+      if (result[last]?.type === detail.type) index = last
+    }
+    if (index === -1) {
+      result.push(detail)
+      continue
+    }
+    const previous = result[index]!
+    result[index] = {
+      ...previous,
+      ...detail,
+      ...(typeof detail.signature === "string" && detail.signature
+        ? { signature: detail.signature }
+        : typeof previous.signature === "string" && previous.signature
+          ? { signature: previous.signature }
+          : {}),
+      ...(typeof previous.format === "string" && previous.format
+        ? { format: previous.format }
+        : typeof detail.format === "string" && detail.format
+          ? { format: detail.format }
+          : {}),
+      ...(typeof detail.text === "string"
+        ? { text: `${typeof previous.text === "string" ? previous.text : ""}${detail.text}` }
+        : {}),
+      ...(typeof detail.summary === "string"
+        ? { summary: `${typeof previous.summary === "string" ? previous.summary : ""}${detail.summary}` }
+        : {}),
+    }
+  }
+  return result
+}
+
 const step = (state: ParserState, event: OpenAIChatEvent) =>
   Effect.gen(function* () {
     const events: LLMEvent[] = []
@@ -408,19 +540,46 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
     const finishReason = choice?.finish_reason ? mapFinishReason(choice.finish_reason) : state.finishReason
     const delta = choice?.delta
     const toolDeltas = delta?.tool_calls ?? []
+    const reasoningDetails = mergeReasoningDetails(state.reasoningDetails, delta?.reasoning_details ?? [])
     let tools = state.tools
 
     let lifecycle = state.lifecycle
 
-    if (delta?.reasoning_content)
-      lifecycle = Lifecycle.reasoningDelta(lifecycle, events, "reasoning-0", delta.reasoning_content)
+    const reasoning = reasoningDelta(delta)
+    const reasoningField = state.reasoningField ?? reasoning?.field
+    const currentReasoningMetadata = reasoningField
+      ? reasoningMetadata(
+          reasoningField,
+          reasoningDetails.filter((detail) => detail.type !== "reasoning.encrypted"),
+        )
+      : undefined
+    const completeReasoningMetadata = reasoningField ? reasoningMetadata(reasoningField, reasoningDetails) : undefined
+    if (reasoning) {
+      lifecycle = Lifecycle.reasoningStart(lifecycle, events, "reasoning-0", currentReasoningMetadata)
+      events.push(
+        LLMEvent.reasoningDelta({
+          id: "reasoning-0",
+          text: reasoning.text,
+          providerMetadata: currentReasoningMetadata,
+        }),
+      )
+    }
 
     if (delta?.content) {
-      lifecycle = Lifecycle.reasoningEnd(lifecycle, events, "reasoning-0")
+      lifecycle = Lifecycle.reasoningEnd(lifecycle, events, "reasoning-0", completeReasoningMetadata)
       lifecycle = Lifecycle.textDelta(lifecycle, events, "text-0", delta.content)
     }
 
-    if (toolDeltas.length) lifecycle = Lifecycle.reasoningEnd(lifecycle, events, "reasoning-0")
+    if (toolDeltas.length)
+      lifecycle = Lifecycle.reasoningEnd(lifecycle, events, "reasoning-0", currentReasoningMetadata)
+
+    if (finishReason !== undefined)
+      lifecycle = Lifecycle.reasoningEnd(
+        lifecycle,
+        events,
+        "reasoning-0",
+        toolDeltas.length > 0 || Object.keys(tools).length > 0 ? currentReasoningMetadata : completeReasoningMetadata,
+      )
 
     for (const tool of toolDeltas) {
       const result = ToolStream.appendOrStart(
@@ -446,10 +605,14 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
     return [
       {
         tools: finished?.tools ?? tools,
-        toolCallEvents: finished?.events ?? state.toolCallEvents,
+        toolCallEvents: finished
+          ? withEncryptedReasoningDetails(finished.events, reasoningDetails)
+          : state.toolCallEvents,
         usage,
         finishReason,
         lifecycle,
+        reasoningDetails,
+        reasoningField,
       },
       events,
     ] as const
@@ -482,7 +645,13 @@ export const protocol = Protocol.make({
   },
   stream: {
     event: Protocol.jsonEvent(OpenAIChatEvent),
-    initial: () => ({ tools: ToolStream.empty<number>(), toolCallEvents: [], lifecycle: Lifecycle.initial() }),
+    initial: () => ({
+      tools: ToolStream.empty<number>(),
+      toolCallEvents: [],
+      lifecycle: Lifecycle.initial(),
+      reasoningDetails: [],
+      reasoningField: undefined,
+    }),
     step,
     onHalt: finishEvents,
   },

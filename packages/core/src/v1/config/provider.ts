@@ -4,6 +4,10 @@ import { Schema } from "effect"
 import { PositiveInt } from "../../schema"
 
 export const ModelStatus = Schema.Literals(["alpha", "beta", "deprecated", "active"])
+const InterleavedField = Schema.Union([
+  Schema.Literals(["reasoning", "reasoning_content", "reasoning_text", "reasoning_details"]),
+  Schema.String,
+])
 
 export const Model = Schema.Struct({
   id: Schema.optional(Schema.String),
@@ -18,7 +22,7 @@ export const Model = Schema.Struct({
     Schema.Union([
       Schema.Literal(true),
       Schema.Struct({
-        field: Schema.Literals(["reasoning", "reasoning_content", "reasoning_details"]),
+        field: InterleavedField,
       }),
     ]),
   ),
