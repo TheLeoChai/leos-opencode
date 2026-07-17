@@ -1,6 +1,13 @@
 import { expect, test } from "bun:test"
 import type { SessionMessageAssistant, SessionMessageInfo } from "@opencode-ai/client"
-import { messageBoundaryIDs, reduceSessionRows } from "../../../src/routes/session/rows"
+import { messageBoundaryIDs, reduceSessionRows, type SessionRow } from "../../../src/routes/session/rows"
+
+const withoutIDs = (rows: ReturnType<typeof reduceSessionRows>) =>
+  rows.map(({ id: _id, ...row }) => {
+    if (row.type !== "group") return row
+    const { origin: _origin, ...group } = row
+    return group
+  })
 
 test("assigns assistant boundaries to the first rendered row instead of the first text row", () => {
   const messages: SessionMessageInfo[] = [
@@ -14,6 +21,22 @@ test("assigns assistant boundaries to the first rendered row instead of the firs
   const rows = reduceSessionRows(messages)
 
   expect(messageBoundaryIDs(rows, messages)).toEqual(["user-1", "assistant-1", undefined, undefined])
+})
+
+test("keeps a group boundary at its immutable origin while visible refs repartition", () => {
+  const messages = [assistant("assistant-1", []), assistant("assistant-2", [])]
+  const origin = { messageID: "assistant-1", partID: "read-1" }
+  const group: SessionRow = {
+    id: "group",
+    type: "group",
+    kind: "exploration",
+    origin,
+    refs: [{ messageID: "assistant-2", partID: "grep-1" }],
+    pending: [origin],
+    completed: false,
+  }
+
+  expect(messageBoundaryIDs([group], messages)).toEqual(["assistant-1"])
 })
 
 test("groups exploration parts across assistant messages until a delimiter", () => {
@@ -30,7 +53,7 @@ test("groups exploration parts across assistant messages until a delimiter", () 
     ]),
   ]
 
-  expect(reduceSessionRows(messages)).toEqual([
+  expect(withoutIDs(reduceSessionRows(messages))).toEqual([
     { type: "message", messageID: "user-1" },
     { type: "part", ref: { messageID: "assistant-1", partID: "text:0" } },
     {
@@ -57,7 +80,7 @@ test("keeps non-exploration tools as individual part rows", () => {
     ]),
   ]
 
-  expect(reduceSessionRows(messages)).toEqual([
+  expect(withoutIDs(reduceSessionRows(messages))).toEqual([
     {
       type: "group",
       kind: "exploration",
@@ -86,7 +109,7 @@ test("assigns stable kind ordinals within an assistant message", () => {
     ]),
   ]
 
-  expect(reduceSessionRows(messages)).toEqual([
+  expect(withoutIDs(reduceSessionRows(messages))).toEqual([
     { type: "part", ref: { messageID: "assistant-1", partID: "text:0" } },
     {
       type: "group",
@@ -114,7 +137,7 @@ test("groups adjacent reasoning parts until a visible boundary", () => {
     ]),
   ]
 
-  expect(reduceSessionRows(messages)).toEqual([
+  expect(withoutIDs(reduceSessionRows(messages))).toEqual([
     {
       type: "group",
       kind: "reasoning",
@@ -146,7 +169,7 @@ test("groups across empty assistant reasoning parts", () => {
     ]),
   ]
 
-  expect(reduceSessionRows(messages)).toEqual([
+  expect(withoutIDs(reduceSessionRows(messages))).toEqual([
     {
       type: "group",
       kind: "reasoning",
@@ -177,7 +200,7 @@ test("completes exploration groups when another row follows", () => {
     finished,
   ]
 
-  expect(reduceSessionRows(messages)).toEqual([
+  expect(withoutIDs(reduceSessionRows(messages))).toEqual([
     {
       type: "group",
       kind: "exploration",
@@ -209,7 +232,7 @@ test("hides synthetic messages without descriptions", () => {
     assistant("assistant-2", [{ type: "tool", id: "grep-1", name: "grep", state: pending(), time: { created: 3 } }]),
   ]
 
-  expect(reduceSessionRows(messages)).toEqual([
+  expect(withoutIDs(reduceSessionRows(messages))).toEqual([
     {
       type: "group",
       kind: "exploration",
@@ -236,7 +259,7 @@ test("renders synthetic messages with descriptions", () => {
     assistant("assistant-2", [{ type: "tool", id: "grep-1", name: "grep", state: pending(), time: { created: 3 } }]),
   ]
 
-  expect(reduceSessionRows(messages)).toEqual([
+  expect(withoutIDs(reduceSessionRows(messages))).toEqual([
     {
       type: "group",
       kind: "exploration",
@@ -263,7 +286,7 @@ test("renders a footer for a pre-output retry assistant after replay", () => {
     error: { type: "provider.transport", message: "Disconnected" },
   }
 
-  expect(reduceSessionRows([message])).toEqual([{ type: "assistant-footer", messageID: "assistant-retry" }])
+  expect(withoutIDs(reduceSessionRows([message]))).toEqual([{ type: "assistant-footer", messageID: "assistant-retry" }])
 })
 
 test("places a running compaction barrier before every queued user message", () => {
@@ -287,7 +310,7 @@ test("places a running compaction barrier before every queued user message", () 
     queued("user-after", "After", 3),
   ]
 
-  expect(reduceSessionRows(messages, new Set(["user-before", "user-after"]))).toEqual([
+  expect(withoutIDs(reduceSessionRows(messages, new Set(["user-before", "user-after"])))).toEqual([
     { type: "message", messageID: "compaction" },
     { type: "message", messageID: "user-before" },
     { type: "message", messageID: "user-after" },

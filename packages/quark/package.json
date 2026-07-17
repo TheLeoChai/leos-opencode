@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "effect-quark",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./solid": "./src/solid.ts"
+  },
+  "scripts": {
+    "bench:keyed": "bun --conditions=browser bench/keyed.ts",
+    "bench:row-key": "bun --conditions=browser bench/row-key.ts",
+    "test": "bun --conditions=browser test"
+  },
+  "dependencies": {
+    "alien-signals": "3.2.1",
+    "solid-js": "catalog:"
+  }
+}

@@ -13,6 +13,7 @@ import {
   Switch,
   useContext,
 } from "solid-js"
+import { KeyedFor } from "effect-quark/solid"
 import path from "node:path"
 import { EOL, tmpdir } from "node:os"
 import { mkdir, writeFile } from "node:fs/promises"
@@ -186,7 +187,7 @@ export function Session() {
   const client = useClient()
   const editor = useEditorContext()
   const rows = createSessionRows(() => route.sessionID)
-  const boundaries = createMemo(() => messageBoundaryIDs(rows, messages()))
+  const boundaries = createMemo(() => messageBoundaryIDs(rows.slots().map((slot) => slot()), messages()))
   const [navigationMessage, setNavigationMessage] = createSignal<string>()
   const [navigationSlack, setNavigationSlack] = createSignal(0)
 
@@ -903,15 +904,15 @@ export function Session() {
               flexGrow={1}
               scrollAcceleration={scrollAcceleration()}
             >
-              <For each={rows}>
+              <KeyedFor each={rows.slots}>
                 {(row, index) => (
                   <SessionRowView
-                    row={row}
+                    row={row()}
                     message={(messageID) => data.session.message.get(route.sessionID, messageID)}
                     boundaryID={boundaries()[index()]}
                   />
                 )}
-              </For>
+              </KeyedFor>
               <BackgroundToolHint messages={messages()} />
               <Show when={session()?.revert?.messageID}>
                 <RevertMessage

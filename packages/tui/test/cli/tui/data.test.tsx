@@ -28,6 +28,19 @@ async function wait(fn: () => boolean, timeout = 2000) {
   }
 }
 
+function readRows(rows: ReturnType<typeof createSessionRows>) {
+  return rows.values()
+}
+
+function withoutRowID(row: SessionRow) {
+  const { id: _id, ...value } = row
+  if (value.type === "group") {
+    const { origin: _origin, ...group } = value
+    return group
+  }
+  return value
+}
+
 function emitEvent(events: ReturnType<typeof createEventStream>, event: OpenCodeEvent) {
   events.emit({ ...event, location: { directory } })
 }
@@ -687,10 +700,16 @@ test("completes exploration when a queued prompt is promoted", async () => {
   }, events)
   let rows!: ReturnType<typeof createSessionRows>
   let client!: ReturnType<typeof useClient>
+  let structuralUpdates = 0
+  const metrics = { slotPublications: 0, structuralPublications: 0, equivalenceSuppressions: 0 }
 
   function Probe() {
     client = useClient()
-    rows = createSessionRows(() => sessionID)
+    rows = createSessionRows(() => sessionID, { metrics })
+    createEffect(() => {
+      rows.slots()
+      structuralUpdates++
+    })
     return <box />
   }
 
@@ -732,31 +751,81 @@ test("completes exploration when a queued prompt is promoted", async () => {
         name: "read",
       },
     })
-    await wait(() => rows.some((row) => row.type === "group" && !row.completed))
+    await wait(() => readRows(rows).some((row) => row.type === "group" && !row.completed))
+    expect(metrics.slotPublications).toBe(0)
+    expect(metrics.structuralPublications).toBe(1)
+
+    emitEvent(events, {
+      id: "evt_tool_started_2",
+      created: 2,
+      type: "session.tool.input.started",
+      durable: durable(sessionID, 2),
+      data: {
+        sessionID,
+        assistantMessageID: "message-assistant",
+        callID: "call-read-2",
+        name: "read",
+      },
+    })
+    await wait(() => {
+      const group = readRows(rows).find((row) => row.type === "group")
+      return group?.refs.length === 2
+    })
+    expect(metrics.slotPublications).toBe(1)
+    expect(metrics.structuralPublications).toBe(1)
+    const groupSlot = rows.slots().find((slot) => slot().type === "group")
+    expect(groupSlot).toBeDefined()
+    const beforePermission = structuralUpdates
+
+    emitEvent(events, {
+      id: "evt_permission_asked",
+      created: 2,
+      type: "permission.v2.asked",
+      data: {
+        id: "permission-read",
+        sessionID,
+        action: "read",
+        resources: ["src/example.ts"],
+        source: { type: "tool", messageID: "message-assistant", callID: "call-read" },
+      },
+    })
+    await wait(() => {
+      const group = readRows(rows).find((row) => row.type === "group" && row.kind === "exploration")
+      return group?.pending[0]?.partID === "call-read"
+    })
+    expect(rows.slots().find((slot) => slot().type === "group")).toBe(groupSlot)
+    expect(structuralUpdates).toBe(beforePermission)
+    expect(metrics.slotPublications).toBe(2)
+    expect(metrics.structuralPublications).toBe(1)
 
     emitEvent(events, {
       id: "evt_prompt_admitted",
       created: 3,
       type: "session.input.admitted",
-      durable: durable(sessionID, 2),
+      durable: durable(sessionID, 3),
       data: {
         sessionID,
         inputID: "message-user",
         input: { type: "user", data: { text: "Continue" }, delivery: "steer" },
       },
     })
-    await wait(() => rows.at(-1)?.type === "message")
-    expect(rows.find((row) => row.type === "group")?.completed).toBe(false)
+    await wait(() => readRows(rows).at(-1)?.type === "message")
+    expect(readRows(rows).find((row) => row.type === "group")?.completed).toBe(false)
+    expect(metrics.slotPublications).toBe(2)
+    expect(metrics.structuralPublications).toBe(2)
 
     emitEvent(events, {
       id: "evt_prompt_promoted",
       created: 4,
       type: "session.input.promoted",
-      durable: durable(sessionID, 3),
+      durable: durable(sessionID, 4),
       data: { sessionID, inputID: "message-user" },
     })
-    await wait(() => rows.find((row) => row.type === "group")?.completed === true)
-    expect(rows.at(-1)).toEqual({ type: "message", messageID: "message-user" })
+    await wait(() => readRows(rows).find((row) => row.type === "group")?.completed === true)
+    expect(rows.slots().find((slot) => slot().type === "group")).toBe(groupSlot)
+    expect(withoutRowID(readRows(rows).at(-1)!)).toEqual({ type: "message", messageID: "message-user" })
+    expect(metrics.slotPublications).toBe(3)
+    expect(metrics.structuralPublications).toBe(2)
   } finally {
     app.renderer.destroy()
   }
@@ -804,8 +873,90 @@ test("classifies live tool rows independently of their call ID", async () => {
       },
     })
 
-    await wait(() => rows.length > 0)
-    expect(rows).toEqual([{ type: "part", ref: { messageID: "message-assistant", partID: "reasoning:0" } }])
+    await wait(() => readRows(rows).length > 0)
+    expect(readRows(rows).map(withoutRowID)).toEqual([
+      { type: "part", ref: { messageID: "message-assistant", partID: "reasoning:0" } },
+    ])
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("does not publish timeline rows for duplicate streaming deltas", async () => {
+  const events = createEventStream()
+  const sessionID = "session-stream-metrics"
+  const calls = createFetch((url) => {
+    if (url.pathname === `/api/session/${sessionID}/message`) return json({ data: [], cursor: {} })
+  }, events)
+  const metrics = { slotPublications: 0, structuralPublications: 0, equivalenceSuppressions: 0 }
+  let data!: ReturnType<typeof useData>
+  let rows!: ReturnType<typeof createSessionRows>
+  let client!: ReturnType<typeof useClient>
+
+  function Probe() {
+    data = useData()
+    client = useClient()
+    rows = createSessionRows(() => sessionID, { metrics })
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <ClientProvider api={createApi(calls.fetch)}>
+        <ProjectProvider>
+          <DataProvider>
+            <Probe />
+          </DataProvider>
+        </ProjectProvider>
+      </ClientProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    await wait(() => client.connection.status() === "connected")
+    emitEvent(events, {
+      id: "evt_stream_step",
+      created: 1,
+      type: "session.step.started",
+      durable: durable(sessionID),
+      data: {
+        sessionID,
+        assistantMessageID: "message-assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+      },
+    })
+    emitEvent(events, {
+      id: "evt_stream_started",
+      created: 2,
+      type: "session.text.started",
+      durable: durable(sessionID, 1),
+      data: { sessionID, assistantMessageID: "message-assistant", ordinal: 0 },
+    })
+    emitEvent(events, {
+      id: "evt_stream_delta_1",
+      created: 3,
+      type: "session.text.delta",
+      data: { sessionID, assistantMessageID: "message-assistant", ordinal: 0, delta: "one" },
+    })
+    await wait(() => readRows(rows).some((row) => row.type === "part"))
+    const afterFirst = { ...metrics }
+
+    emitEvent(events, {
+      id: "evt_stream_delta_2",
+      created: 4,
+      type: "session.text.delta",
+      data: { sessionID, assistantMessageID: "message-assistant", ordinal: 0, delta: "two" },
+    })
+    await wait(() => {
+      const message = data.session.message.get(sessionID, "message-assistant")
+      return (
+        message?.type === "assistant" && message.content.some((part) => part.type === "text" && part.text === "onetwo")
+      )
+    })
+
+    expect(afterFirst).toEqual({ slotPublications: 0, structuralPublications: 1, equivalenceSuppressions: 0 })
+    expect(metrics).toEqual(afterFirst)
   } finally {
     app.renderer.destroy()
   }
@@ -957,13 +1108,15 @@ test("tracks session status from active sessions and execution events", async ()
       })
   }, events)
   let data!: ReturnType<typeof useData>
-  let rows!: SessionRow[]
-  let manualRows!: SessionRow[]
+  let rows!: ReturnType<typeof createSessionRows>
+  let manualRows!: ReturnType<typeof createSessionRows>
+  let liveRows!: ReturnType<typeof createSessionRows>
 
   function Probe() {
     data = useData()
     rows = createSessionRows(() => "session-retry")
     manualRows = createSessionRows(() => "session-manual")
+    liveRows = createSessionRows(() => "session-live")
     return <box />
   }
 
@@ -1159,7 +1312,7 @@ test("tracks session status from active sessions and execution events", async ()
       const assistant = data.session.message.get("session-retry", "message-retry")
       return assistant?.type === "assistant" && assistant.retry?.attempt === 2
     })
-    await wait(() => rows.some((row) => row.type === "assistant-footer" && row.messageID === "message-retry"))
+    await wait(() => readRows(rows).some((row) => row.type === "assistant-footer" && row.messageID === "message-retry"))
     emitEvent(events, {
       id: "evt_retry_next_step",
       created: 2_000,
@@ -1176,7 +1329,9 @@ test("tracks session status from active sessions and execution events", async ()
       const assistant = data.session.message.get("session-retry", "message-retry")
       return assistant?.type === "assistant" && assistant.retry === undefined
     })
-    await wait(() => !rows.some((row) => row.type === "assistant-footer" && row.messageID === "message-retry"))
+    await wait(
+      () => !readRows(rows).some((row) => row.type === "assistant-footer" && row.messageID === "message-retry"),
+    )
     expect(data.session.message.list("session-retry").filter((message) => message.type === "assistant")).toHaveLength(1)
     emitEvent(events, {
       id: "evt_retry_scheduled_again",
@@ -1231,7 +1386,9 @@ test("tracks session status from active sessions and execution events", async ()
       return message?.type === "compaction" && message.status === "running" && message.summary === "Streamed summary"
     })
     expect(data.session.pending.list("session-manual")).toEqual([])
-    const compactionRow = manualRows.find((row) => row.type === "message" && row.messageID === "message-compaction")
+    const compactionRow = readRows(manualRows).find(
+      (row) => row.type === "message" && row.messageID === "message-compaction",
+    )
     emitEvent(events, {
       id: "evt_manual_compaction_ended",
       created: 3,
@@ -1243,10 +1400,12 @@ test("tracks session status from active sessions and execution events", async ()
       const message = data.session.message.get("session-manual", "message-compaction")
       return message?.type === "compaction" && message.status === "completed"
     })
-    expect(manualRows.filter((row) => row.type === "message")).toEqual([
-      { type: "message", messageID: "message-compaction" },
-    ])
-    expect(manualRows.find((row) => row.type === "message" && row.messageID === "message-compaction")).toBe(
+    expect(
+      readRows(manualRows)
+        .filter((row) => row.type === "message")
+        .map(withoutRowID),
+    ).toEqual([{ type: "message", messageID: "message-compaction" }])
+    expect(readRows(manualRows).find((row) => row.type === "message" && row.messageID === "message-compaction")).toBe(
       compactionRow,
     )
 
@@ -1273,7 +1432,10 @@ test("tracks session status from active sessions and execution events", async ()
       const message = data.session.message.get("session-live", "msg_compaction_started")
       return message?.type === "compaction" && message.status === "running" && message.summary === "Live summary"
     })
-    const autoCompactionRow = rows.find((row) => row.type === "message" && row.messageID === "msg_compaction_started")
+    const autoCompactionRow = readRows(liveRows).find(
+      (row) => row.type === "message" && row.messageID === "msg_compaction_started",
+    )
+    expect(autoCompactionRow).toBeDefined()
 
     emitEvent(events, {
       id: "evt_compaction_ended",
@@ -1291,10 +1453,12 @@ test("tracks session status from active sessions and execution events", async ()
       status: "completed",
       summary: "Live summary",
     })
-    expect(rows.find((row) => row.type === "message" && row.messageID === "msg_compaction_started")).toBe(
+    expect(readRows(liveRows).find((row) => row.type === "message" && row.messageID === "msg_compaction_started")).toBe(
       autoCompactionRow,
     )
-    expect(rows.some((row) => row.type === "message" && row.messageID === "msg_compaction_ended")).toBeFalse()
+    expect(
+      readRows(liveRows).some((row) => row.type === "message" && row.messageID === "msg_compaction_ended"),
+    ).toBeFalse()
   } finally {
     app.renderer.destroy()
   }
@@ -1353,8 +1517,12 @@ test("restores queued compaction from durable pending input", async () => {
       "message-compaction-queued",
       "message-compaction-later",
     ])
-    await wait(() => rows.filter((row) => row.type === "compaction-queued").length === 2)
-    expect(rows.filter((row) => row.type === "compaction-queued")).toEqual([
+    await wait(() => readRows(rows).filter((row) => row.type === "compaction-queued").length === 2)
+    expect(
+      readRows(rows)
+        .filter((row) => row.type === "compaction-queued")
+        .map(withoutRowID),
+    ).toEqual([
       { type: "compaction-queued", inputID: "message-compaction-queued" },
       { type: "compaction-queued", inputID: "message-compaction-later" },
     ])
@@ -1371,8 +1539,8 @@ test("restores queued compaction from durable pending input", async () => {
         text: "Active output",
       },
     })
-    await wait(() => rows.some((row) => row.type === "part"))
-    expect(rows.map((row) => row.type)).toEqual(["part", "compaction-queued", "compaction-queued"])
+    await wait(() => readRows(rows).some((row) => row.type === "part"))
+    expect(readRows(rows).map((row) => row.type)).toEqual(["part", "compaction-queued", "compaction-queued"])
 
     emitEvent(events, {
       id: "evt_compaction_started",

@@ -1,38 +1,72 @@
 import type { SessionMessageAssistant, SessionMessageInfo } from "@opencode-ai/client"
-import { createEffect, on, onCleanup, type Accessor } from "solid-js"
-import { createStore, produce, reconcile } from "solid-js/store"
+import { Keyed, Transaction } from "effect-quark"
+import { useValue } from "effect-quark/solid"
+import { batch, createEffect, on, onCleanup, type Accessor } from "solid-js"
 import { useData } from "../../context/data"
 import { useClient } from "../../context/client"
 
 export type PartRef = {
-  messageID: string
-  partID: string
+  readonly messageID: string
+  readonly partID: string
 }
 
-export type SessionRow =
+export type SessionRow = { readonly id: string } & (
   | { type: "message"; messageID: string }
   | { type: "compaction-queued"; inputID: string }
   | { type: "part"; ref: PartRef }
   | {
       type: "group"
       kind: "reasoning"
+      origin: PartRef
       refs: PartRef[]
       completed: boolean
     }
   | {
       type: "group"
       kind: "exploration"
+      origin: PartRef
       refs: PartRef[]
       pending: PartRef[]
       completed: boolean
     }
   | { type: "assistant-footer"; messageID: string }
+)
 
-export function createSessionRows(sessionID: Accessor<string>) {
+export function createSessionRows(sessionID: Accessor<string>, options?: { readonly metrics?: Keyed.Metrics }) {
   const data = useData()
   const client = useClient()
-  const [rows, setRows] = createStore<SessionRow[]>([])
+  const reportMetrics = process.env.OPENCODE_QUARK_METRICS === "1"
+  const metrics = options?.metrics ?? (reportMetrics ? Keyed.metrics() : undefined)
+  const state = Keyed.make({ key: rowKey, equivalent: sameRow, metrics })
+  const seenParts = new Set<string>()
+  const rows = {
+    slots: useValue(state.slots),
+    values: state.values,
+  }
   const revertBoundary = () => data.session.get(sessionID())?.revert?.messageID
+
+  const setRows = (value: SessionRow[]) => {
+    batch(() => {
+      state.set(value)
+      seenParts.clear()
+      value.forEach((row) => {
+        if (row.type === "part") {
+          seenParts.add(row.id)
+          return
+        }
+        if (row.type !== "group") return
+        row.refs.forEach((ref) => seenParts.add(partRowID(ref)))
+        if (row.kind === "exploration") row.pending.forEach((ref) => seenParts.add(partRowID(ref)))
+      })
+    })
+  }
+  const mutate = (f: () => void) => batch(() => Transaction.run(f))
+  const insert = (current: readonly SessionRow[], index: number, row: SessionRow) =>
+    state.insert(row, index === current.length ? "end" : { before: current[index].id })
+  const complete = (current: readonly SessionRow[], index: number) => {
+    const previous = current[index - 1]
+    if (previous?.type === "group" && !previous.completed) state.update({ ...previous, completed: true })
+  }
 
   function reduce() {
     const messages = data.session.message.list(sessionID())
@@ -47,7 +81,7 @@ export function createSessionRows(sessionID: Accessor<string>) {
       ...data.session.pending
         .list(sessionID())
         .filter((item) => item.type === "compaction")
-        .map((item): SessionRow => ({ type: "compaction-queued", inputID: item.id })),
+        .map((item) => compactionQueuedRow(item.id)),
     )
     return rows
   }
@@ -62,22 +96,31 @@ export function createSessionRows(sessionID: Accessor<string>) {
 
   createEffect(() => {
     const pending = pendingPermissions()
-    setRows(
-      produce((draft) => {
-        partitionPending(draft, pending)
-      }),
-    )
+    mutate(() => {
+      state.values().forEach((row) => {
+        if (row.type !== "group" || row.kind !== "exploration") return
+        const changed =
+          row.refs.some((ref) => pending.has(ref.partID)) || row.pending.some((ref) => !pending.has(ref.partID))
+        if (!changed) return
+        const refs = [...row.refs, ...row.pending]
+        state.update({
+          ...row,
+          refs: refs.filter((ref) => !pending.has(ref.partID)),
+          pending: refs.filter((ref) => pending.has(ref.partID)),
+        })
+      })
+    })
   })
 
   createEffect(
     on([sessionID, () => client.connection.status()], ([id, status]) => {
       if (status !== "connected") return
-      setRows(reconcile(reduce()))
+      setRows(reduce())
       void data.session.pending.sync(id).catch(() => undefined)
       void data.session.message.sync(id).then(
         () => {
           if (sessionID() !== id) return
-          setRows(reconcile(reduce()))
+          setRows(reduce())
         },
         () => undefined,
       )
@@ -87,7 +130,7 @@ export function createSessionRows(sessionID: Accessor<string>) {
   // Re-reduce when the revert boundary changes (stage/clear/commit).
   createEffect(
     on(revertBoundary, () => {
-      setRows(reconcile(reduce()))
+      setRows(reduce())
     }),
   )
 
@@ -98,7 +141,7 @@ export function createSessionRows(sessionID: Accessor<string>) {
           .list(sessionID())
           .filter((item) => item.type === "compaction")
           .map((item) => item.id),
-      () => setRows(reconcile(reduce())),
+      () => setRows(reduce()),
     ),
   )
 
@@ -123,48 +166,57 @@ export function createSessionRows(sessionID: Accessor<string>) {
                 ]
               : [],
         ),
-      () => setRows(reconcile(reduce())),
+      () => setRows(reduce()),
     ),
   )
 
   const appendMessage = (messageID: string) =>
-    setRows(
-      produce((draft) => {
-        if (draft.some((row) => row.type === "message" && row.messageID === messageID)) return
-        const pending = isPending(messageID)
-        const message = data.session.message.get(sessionID(), messageID)
-        const index =
-          message?.type === "compaction" && pending ? queuedStart(draft) : pending ? draft.length : queuedStart(draft)
-        if (!pending) completePrevious(draft, index)
-        draft.splice(index, 0, { type: "message", messageID })
-      }),
-    )
+    mutate(() => {
+      if (state.has(messageRowID(messageID))) return
+      const current = state.values()
+      const pending = isPending(messageID)
+      const message = data.session.message.get(sessionID(), messageID)
+      const index =
+        message?.type === "compaction" && pending
+          ? queuedStart(current)
+          : pending
+            ? current.length
+            : queuedStart(current)
+      if (!pending) complete(current, index)
+      insert(current, index, messageRow(messageID))
+    })
 
   const appendPart = (ref: PartRef, part: AppendPart) =>
-    setRows(
-      produce((draft) => {
-        if (hasPart(draft, ref)) return
-        append(draft, ref, part, queuedStart(draft))
-      }),
-    )
+    mutate(() => {
+      const id = partRowID(ref)
+      if (seenParts.has(id)) return
+      const current = state.values()
+      const index = queuedStart(current)
+      const previous = current[index - 1]
+      const decision = appendDecision(previous, ref, part)
+      if (decision.type === "join") {
+        state.update({ ...decision.group, refs: [...decision.group.refs, ref] })
+        seenParts.add(id)
+        return
+      }
+      complete(current, index)
+      insert(current, index, decision.row)
+      seenParts.add(id)
+    })
 
   const appendFooter = (messageID: string) =>
-    setRows(
-      produce((draft) => {
-        if (draft.some((row) => row.type === "assistant-footer" && row.messageID === messageID)) return
-        const index = queuedStart(draft)
-        completePrevious(draft, index)
-        draft.splice(index, 0, { type: "assistant-footer", messageID })
-      }),
-    )
+    mutate(() => {
+      if (state.has(footerRowID(messageID))) return
+      const current = state.values()
+      const index = queuedStart(current)
+      complete(current, index)
+      insert(current, index, footerRow(messageID))
+    })
 
   const removeFooter = (messageID: string) =>
-    setRows(
-      produce((draft) => {
-        const index = draft.findIndex((row) => row.type === "assistant-footer" && row.messageID === messageID)
-        if (index !== -1) draft.splice(index, 1)
-      }),
-    )
+    mutate(() => {
+      state.remove(footerRowID(messageID))
+    })
 
   const isPending = (messageID: string) => {
     const message = data.session.message.get(sessionID(), messageID)
@@ -172,7 +224,7 @@ export function createSessionRows(sessionID: Accessor<string>) {
     return message?.type === "compaction" && message.status === "running"
   }
 
-  const queuedStart = (rows: SessionRow[]) => {
+  const queuedStart = (rows: readonly SessionRow[]) => {
     const index = rows.findIndex(
       (row) => row.type === "compaction-queued" || (row.type === "message" && isPending(row.messageID)),
     )
@@ -252,6 +304,9 @@ export function createSessionRows(sessionID: Accessor<string>) {
     }),
   ]
   onCleanup(() => subscriptions.forEach((unsubscribe) => unsubscribe()))
+  onCleanup(() => {
+    if (reportMetrics && metrics) console.error(`QUARK_TIMELINE_METRICS ${sessionID()} ${JSON.stringify(metrics)}`)
+  })
 
   return rows
 }
@@ -268,7 +323,7 @@ export function reduceSessionRows(messages: SessionMessageInfo[], inputs = new S
     if (message.type !== "assistant") {
       if (message.type === "synthetic" && !message.description?.trim()) return rows
       if (!pending.has(message.id)) completePrevious(rows)
-      rows.push({ type: "message", messageID: message.id })
+      rows.push(messageRow(message.id))
       return rows
     }
     const ordinals = { text: 0, reasoning: 0 }
@@ -279,13 +334,20 @@ export function reduceSessionRows(messages: SessionMessageInfo[], inputs = new S
     })
     if ((message.finish && !["tool-calls", "unknown"].includes(message.finish)) || message.error || message.retry) {
       completePrevious(rows)
-      rows.push({ type: "assistant-footer", messageID: message.id })
+      rows.push(footerRow(message.id))
     }
     return rows
   }, [])
 }
 
-export function messageBoundaryIDs(rows: SessionRow[], messages: SessionMessageInfo[]) {
+type BoundaryRow =
+  | Pick<Extract<SessionRow, { type: "message" }>, "type" | "messageID">
+  | Pick<Extract<SessionRow, { type: "compaction-queued" }>, "type">
+  | Pick<Extract<SessionRow, { type: "part" }>, "type" | "ref">
+  | Pick<Extract<SessionRow, { type: "group" }>, "type" | "origin">
+  | Pick<Extract<SessionRow, { type: "assistant-footer" }>, "type" | "messageID">
+
+export function messageBoundaryIDs(rows: readonly BoundaryRow[], messages: SessionMessageInfo[]) {
   const byID = new Map(messages.map((message) => [message.id, message]))
   const seen = new Set<string>()
   return rows.map((row) => {
@@ -296,7 +358,7 @@ export function messageBoundaryIDs(rows: SessionRow[], messages: SessionMessageI
   })
 }
 
-function rowBoundaryMessageID(row: SessionRow, messages: Map<string, SessionMessageInfo>) {
+function rowBoundaryMessageID(row: BoundaryRow, messages: Map<string, SessionMessageInfo>) {
   if (row.type === "message") {
     const message = messages.get(row.messageID)
     if (message?.type === "user" && message.text.trim()) return message.id
@@ -306,7 +368,7 @@ function rowBoundaryMessageID(row: SessionRow, messages: Map<string, SessionMess
     row.type === "part"
       ? row.ref.messageID
       : row.type === "group"
-        ? row.refs[0]?.messageID
+        ? row.origin.messageID
         : row.type === "assistant-footer"
           ? row.messageID
           : undefined
@@ -327,28 +389,25 @@ export function resolvePart(message: SessionMessageAssistant, partID: string) {
 type AppendPart = { type: "text" } | { type: "reasoning" } | { type: "tool"; name: string }
 
 function append(rows: SessionRow[], ref: PartRef, part: AppendPart, index = rows.length) {
-  if (part.type === "reasoning") {
-    const previous = rows[index - 1]
-    if (previous?.type === "group" && previous.kind === "reasoning") {
-      previous.refs.push(ref)
-      return
-    }
-    completePrevious(rows, index)
-    rows.splice(index, 0, { type: "group", kind: "reasoning", refs: [ref], completed: false })
-    return
-  }
-  if (part.type === "tool" && exploration(part.name)) {
-    const previous = rows[index - 1]
-    if (previous?.type === "group" && previous.kind === "exploration") {
-      previous.refs.push(ref)
-      return
-    }
-    completePrevious(rows, index)
-    rows.splice(index, 0, { type: "group", kind: "exploration", refs: [ref], pending: [], completed: false })
+  const previous = rows[index - 1]
+  const decision = appendDecision(previous, ref, part)
+  if (decision.type === "join") {
+    decision.group.refs.push(ref)
     return
   }
   completePrevious(rows, index)
-  rows.splice(index, 0, { type: "part", ref })
+  rows.splice(index, 0, decision.row)
+}
+
+function appendDecision(previous: SessionRow | undefined, ref: PartRef, part: AppendPart) {
+  const kind = groupKind(part)
+  if (kind && previous?.type === "group" && previous.kind === kind) return { type: "join" as const, group: previous }
+  return { type: "insert" as const, row: kind ? groupRow(kind, ref) : partRow(ref) }
+}
+
+function groupKind(part: AppendPart) {
+  if (part.type === "reasoning") return "reasoning" as const
+  if (part.type === "tool" && exploration(part.name)) return "exploration" as const
 }
 
 function completePrevious(rows: SessionRow[], index = rows.length) {
@@ -369,11 +428,64 @@ function exploration(name: string) {
   return ["read", "glob", "grep"].includes(name.toLowerCase())
 }
 
-function hasPart(rows: SessionRow[], ref: PartRef) {
-  return rows.some((row) => {
-    if (row.type === "part") return row.ref.messageID === ref.messageID && row.ref.partID === ref.partID
-    if (row.type !== "group") return false
-    const refs = row.kind === "exploration" ? [...row.refs, ...row.pending] : row.refs
-    return refs.some((item) => item.messageID === ref.messageID && item.partID === ref.partID)
-  })
+function messageRow(messageID: string): SessionRow {
+  return { id: messageRowID(messageID), type: "message", messageID }
+}
+
+function messageRowID(messageID: string) {
+  return `m${segment(messageID)}`
+}
+
+function compactionQueuedRow(inputID: string): SessionRow {
+  return { id: `c${segment(inputID)}`, type: "compaction-queued", inputID }
+}
+
+function partRow(ref: PartRef): SessionRow {
+  return { id: partRowID(ref), type: "part", ref }
+}
+
+function partRowID(ref: PartRef) {
+  return `p${segment(ref.messageID)}${segment(ref.partID)}`
+}
+
+function groupRow(kind: "reasoning" | "exploration", ref: PartRef): SessionRow {
+  const id = `g${kind === "reasoning" ? "r" : "e"}${segment(ref.messageID)}${segment(ref.partID)}`
+  if (kind === "reasoning") return { id, type: "group", kind, origin: ref, refs: [ref], completed: false }
+  return { id, type: "group", kind, origin: ref, refs: [ref], pending: [], completed: false }
+}
+
+function footerRow(messageID: string): SessionRow {
+  return { id: footerRowID(messageID), type: "assistant-footer", messageID }
+}
+
+function footerRowID(messageID: string) {
+  return `f${segment(messageID)}`
+}
+
+function segment(value: string) {
+  return `${value.length}:${value}`
+}
+
+function rowKey(row: SessionRow) {
+  return row.id
+}
+
+function sameRow(left: SessionRow, right: SessionRow) {
+  if (left.type !== right.type) return false
+  if (left.type === "message" && right.type === "message") return left.messageID === right.messageID
+  if (left.type === "compaction-queued" && right.type === "compaction-queued") return left.inputID === right.inputID
+  if (left.type === "part" && right.type === "part") return sameRef(left.ref, right.ref)
+  if (left.type === "assistant-footer" && right.type === "assistant-footer") return left.messageID === right.messageID
+  if (left.type !== "group" || right.type !== "group") return false
+  if (left.kind !== right.kind || left.completed !== right.completed || !sameRefs(left.refs, right.refs)) return false
+  if (left.kind === "reasoning" || right.kind === "reasoning") return true
+  return sameRefs(left.pending, right.pending)
+}
+
+function sameRefs(left: PartRef[], right: PartRef[]) {
+  return left.length === right.length && left.every((ref, index) => sameRef(ref, right[index]))
+}
+
+function sameRef(left: PartRef, right: PartRef) {
+  return left.messageID === right.messageID && left.partID === right.partID
 }
