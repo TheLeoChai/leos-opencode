@@ -57,7 +57,12 @@ const SERVER_CODES = new Set([
   "server_is_overloaded",
   "serviceunavailableexception",
 ])
-const INVALID_REQUEST_CODES = new Set(["invalid_prompt", "invalid_request_error", "validationexception"])
+const INVALID_REQUEST_CODES = new Set([
+  "invalid_prompt",
+  "invalid_request_error",
+  "request_too_large",
+  "validationexception",
+])
 const RATE_LIMIT_TEXT = /rate increased too quickly|rate[-_\s]?limit|too[_\s]?many[_\s]?requests/i
 const QUOTA_TEXT = /insufficient[-_\s]?quota|quota[-_\s]?exceeded/i
 const CONTENT_POLICY_TEXT = /content[-_\s]?policy|content_filter|safety/i
@@ -87,7 +92,8 @@ export function classifyProviderFailure(input: ProviderFailure): LLMError["reaso
     clientScoped &&
     (codes.includes("context_length_exceeded") ||
       codes.includes("model_context_window_exceeded") ||
-      isContextOverflow(text))
+      isContextOverflow(body) ||
+      isContextOverflow(input.message))
   )
     return new InvalidRequestReason({ ...common, classification: "context-overflow" })
   if (CONTENT_POLICY_TEXT.test(text)) return new ContentPolicyReason(common)
@@ -112,6 +118,7 @@ export function classifyProviderFailure(input: ProviderFailure): LLMError["reaso
       retryAfterMs: input.retryAfterMs,
       rateLimit: input.rateLimit,
     })
+  if (codes.some((code) => INVALID_REQUEST_CODES.has(code))) return new InvalidRequestReason(common)
   if (codes.some((code) => SERVER_CODES.has(code) || code.includes("exhausted") || code.includes("unavailable")))
     return new ProviderInternalReason({
       ...common,
@@ -131,7 +138,6 @@ export function classifyProviderFailure(input: ProviderFailure): LLMError["reaso
       status: input.status,
       retryAfterMs: input.retryAfterMs,
     })
-  if (codes.some((code) => INVALID_REQUEST_CODES.has(code))) return new InvalidRequestReason(common)
   if (
     input.status === 400 ||
     input.status === 404 ||

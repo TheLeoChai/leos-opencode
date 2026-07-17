@@ -1,11 +1,17 @@
-import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
+import {
+  APICallError,
+  InvalidResponseDataError,
+  type LanguageModelV3,
+  type LanguageModelV3CallOptions,
+  type LanguageModelV3StreamPart,
+} from "@ai-sdk/provider"
 import { AISDK } from "@opencode-ai/core/aisdk"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { LLM, Message } from "@opencode-ai/ai"
 import { LLMClient } from "@opencode-ai/ai/route"
 import { expect } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Stream } from "effect"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(AISDK.locationLayer)
@@ -17,6 +23,49 @@ const model = (packageName: string, settings: Record<string, unknown> = {}) =>
     package: ProviderV2.aisdk(packageName),
     settings,
     limit: { context: 100, output: 20 },
+  })
+
+const failingLanguage = (error: unknown): LanguageModelV3 => ({
+  specificationVersion: "v3",
+  provider: "test-provider",
+  modelId: "api-model",
+  supportedUrls: {},
+  doGenerate: async () => {
+    throw error
+  },
+  doStream: async () => {
+    throw error
+  },
+})
+
+const streamingLanguage = (...events: LanguageModelV3StreamPart[]): LanguageModelV3 => ({
+  ...failingLanguage(new Error("unused")),
+  doStream: async () => ({
+    stream: new ReadableStream<LanguageModelV3StreamPart>({
+      start(controller) {
+        events.forEach((event) => controller.enqueue(event))
+        controller.close()
+      },
+    }),
+    request: { body: {} },
+  }),
+})
+
+const streamFailure = (language: LanguageModelV3) =>
+  Effect.gen(function* () {
+    const aisdk = yield* AISDK.Service
+    yield* aisdk.hook.sdk((event) => {
+      event.sdk = {}
+    })
+    yield* aisdk.hook.language((event) => {
+      event.language = language
+    })
+    const resolved = yield* aisdk.model(model("@ai-sdk/openai"))
+    const request = LLM.request({ model: resolved, prompt: "Hello" })
+    const prepared = yield* LLMClient.prepare<LanguageModelV3CallOptions>(request)
+    return yield* resolved.route
+      .streamPrepared(prepared.body, request, { http: { execute: () => Effect.die("unused") } })
+      .pipe(Stream.runDrain, Effect.flip)
   })
 
 it.effect("keys language models by package and flattened overlays", () =>
@@ -236,5 +285,79 @@ it.effect("projects replay metadata onto AI SDK prompt parts", () =>
         ],
       },
     ])
+  }),
+)
+
+it.effect("classifies AI SDK API failures with redacted diagnostics", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(
+        new APICallError({
+          message: "Quota exceeded",
+          url: "https://provider.test/v1?key=url-secret",
+          requestBodyValues: {},
+          statusCode: 429,
+          responseHeaders: { "retry-after-ms": "250", "x-api-key": "header-secret" },
+          responseBody: '{"error":{"code":"insufficient_quota","api_key":"body-secret"}}',
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({
+      reason: {
+        _tag: "QuotaExceeded",
+        http: {
+          request: { url: "https://provider.test/v1?key=%3Credacted%3E" },
+          response: { headers: { "x-api-key": "<redacted>" } },
+          body: '{"error":{"code":"insufficient_quota","api_key":"<redacted>"}}',
+        },
+      },
+    })
+  }),
+)
+
+it.effect("classifies AI SDK timeouts", () =>
+  Effect.gen(function* () {
+    const timeout = yield* streamFailure(failingLanguage(new DOMException("timed out", "TimeoutError")))
+
+    expect(timeout).toMatchObject({ reason: { _tag: "Transport", kind: "Timeout" } })
+  }),
+)
+
+it.effect("classifies AI SDK connection failures", () =>
+  Effect.gen(function* () {
+    const reset = yield* streamFailure(
+      failingLanguage(Object.assign(new Error("connection reset"), { code: "ECONNRESET" })),
+    )
+
+    expect(reset).toMatchObject({ reason: { _tag: "Transport", kind: "ECONNRESET" } })
+  }),
+)
+
+it.effect("classifies structured AI SDK stream errors", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      streamingLanguage({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } }),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "ProviderInternal", message: "Overloaded" } })
+  }),
+)
+
+it.effect("classifies malformed AI SDK response causes", () =>
+  Effect.gen(function* () {
+    const error = yield* streamFailure(
+      failingLanguage(
+        new APICallError({
+          message: "Failed to process response",
+          url: "https://provider.test/v1",
+          requestBodyValues: {},
+          statusCode: 200,
+          cause: new InvalidResponseDataError({ data: { invalid: true } }),
+        }),
+      ),
+    )
+
+    expect(error).toMatchObject({ reason: { _tag: "InvalidProviderOutput" } })
   }),
 )

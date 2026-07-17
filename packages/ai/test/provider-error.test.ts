@@ -1,10 +1,29 @@
 import { describe, expect, test } from "bun:test"
-import { isContextOverflow } from "../src"
+import { HttpContext, HttpRequestDetails, isContextOverflow } from "../src"
 import { classifyProviderFailure } from "../src/provider-error"
 
 describe("provider error classification", () => {
   test("classifies Z.AI GLM token limit messages as context overflow", () => {
     expect(isContextOverflow("tokens in request more than max tokens allowed")).toBe(true)
+  })
+
+  test("checks overflow evidence in the message when the response body is uninformative", () => {
+    expect(
+      classifyProviderFailure({
+        message: "Input is too long for requested model",
+        status: 400,
+        http: new HttpContext({
+          request: new HttpRequestDetails({ method: "POST", url: "https://provider.test", headers: {} }),
+          body: "{}",
+        }),
+      }),
+    ).toMatchObject({ classification: "context-overflow" })
+  })
+
+  test("lets semantic invalid-request codes override server status", () => {
+    expect(classifyProviderFailure({ message: "too large", status: 500, code: "request_too_large" })._tag).toBe(
+      "InvalidRequest",
+    )
   })
 
   test("classifies V1 plain-text rate limit fallbacks", () => {

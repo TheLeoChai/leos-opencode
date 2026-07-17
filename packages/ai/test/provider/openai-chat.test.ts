@@ -651,7 +651,22 @@ describe("OpenAI Chat route", () => {
       ])
       const error = yield* LLMClient.generate(request).pipe(Effect.provide(layer), Effect.flip)
 
-      expect(error.message).toContain("Failed to read openai/openai-chat stream")
+      expect(error).toMatchObject({ reason: { _tag: "Transport", message: "connection reset" } })
+    }),
+  )
+
+  it.effect("classifies response body timeouts as transport timeouts", () =>
+    Effect.gen(function* () {
+      const error = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          truncatedStream([], Object.assign(new Error("body timed out"), { code: "UND_ERR_BODY_TIMEOUT" })),
+        ),
+        Effect.flip,
+      )
+
+      expect(error).toMatchObject({
+        reason: { _tag: "Transport", kind: "UND_ERR_BODY_TIMEOUT", message: "body timed out" },
+      })
     }),
   )
 

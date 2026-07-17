@@ -15,7 +15,13 @@ import type {
   SharedV3ProviderOptions,
 } from "@ai-sdk/provider"
 import {
+  AuthenticationReason,
+  classifyProviderFailure,
   FinishReason,
+  HttpContext,
+  HttpRequestDetails,
+  HttpResponseDetails,
+  InvalidRequestReason,
   InvalidProviderOutputReason,
   LLMEvent,
   LLMError,
@@ -23,13 +29,28 @@ import {
   ProviderID,
   ProviderMetadata,
   ToolResultValue,
+  TransportReason,
   UnknownProviderReason,
   type ContentPart,
   type LLMRequest,
   type ToolDefinition,
   type UsageInput,
 } from "@opencode-ai/ai"
-import { Auth, Endpoint, type AnyRoute } from "@opencode-ai/ai/route"
+import {
+  APICallError,
+  EmptyResponseBodyError,
+  InvalidArgumentError,
+  InvalidPromptError,
+  InvalidResponseDataError,
+  JSONParseError,
+  LoadAPIKeyError,
+  LoadSettingError,
+  NoContentGeneratedError,
+  NoSuchModelError,
+  TypeValidationError,
+  UnsupportedFunctionalityError,
+} from "@ai-sdk/provider"
+import { Auth, Endpoint, RequestExecutor, type AnyRoute } from "@opencode-ai/ai/route"
 import { Cause, Context, Effect, Layer, Option, Schema, Scope, Stream } from "effect"
 import { ModelV2 } from "./model"
 import { ProviderV2 } from "./provider"
@@ -39,6 +60,8 @@ type SDK = any
 type UserContent = Extract<LanguageModelV3Message, { role: "user" }>["content"]
 type AssistantContent = Extract<LanguageModelV3Message, { role: "assistant" }>["content"]
 type ToolResultContent = Extract<AssistantContent[number], { type: "tool-result" }>
+
+class ChunkTimeoutError extends Error {}
 
 export interface SDKEvent {
   readonly model: ModelV2.Info
@@ -64,7 +87,7 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
     async pull(ctrl) {
       const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
         const id = setTimeout(() => {
-          const err = new Error("SSE read timed out")
+          const err = new ChunkTimeoutError("SSE read timed out")
           ctl.abort(err)
           void reader.cancel(err)
           reject(err)
@@ -716,15 +739,145 @@ function messageValue(input: unknown) {
 }
 
 function llmError(method: string, error: unknown) {
-  const reason =
-    error instanceof LLMError
-      ? new InvalidProviderOutputReason({ message: error.message })
-      : new UnknownProviderReason({ message: error instanceof Error ? error.message : String(error) })
+  if (error instanceof LLMError) return error
+  const cause = error instanceof Error ? error.cause : undefined
+  const failures = [error, cause]
+  const code = failures.map(machineCode).find((value) => value !== undefined)
+  const reason = (() => {
+    if (
+      error instanceof ChunkTimeoutError ||
+      failures.some((failure) => failure instanceof Error && failure.name === "TimeoutError") ||
+      (code !== undefined && TRANSPORT_TIMEOUT_CODES.has(code))
+    )
+      return new TransportReason({ message: errorMessage(error), kind: code ?? "Timeout" })
+    if (APICallError.isInstance(error)) return apiCallReason(error)
+    if (code !== undefined && TRANSPORT_CONNECTION_CODES.has(code))
+      return new TransportReason({ message: errorMessage(error), kind: code })
+    const malformed = failures.find(isMalformedError)
+    if (malformed) return new InvalidProviderOutputReason({ message: malformed.message })
+    if (LoadAPIKeyError.isInstance(error))
+      return new AuthenticationReason({ message: error.message, kind: "missing" })
+    if (NoSuchModelError.isInstance(error)) return new InvalidRequestReason({ message: error.message })
+    if (
+      LoadSettingError.isInstance(error) ||
+      InvalidPromptError.isInstance(error) ||
+      InvalidArgumentError.isInstance(error) ||
+      UnsupportedFunctionalityError.isInstance(error)
+    )
+      return new InvalidRequestReason({ message: error.message })
+    const providerCode = apiFailureCode(error)
+    if (providerCode)
+      return classifyProviderFailure({ message: apiFailureMessage(error), code: providerCode })
+    return new UnknownProviderReason({ message: errorMessage(error) })
+  })()
   return new LLMError({
     module: "AISDK",
     method,
     reason,
   })
+}
+
+function apiCallReason(error: APICallError) {
+  const malformed = isMalformedError(error.cause) ? error.cause : undefined
+  if (error.statusCode !== undefined && error.statusCode < 400 && malformed)
+    return new InvalidProviderOutputReason({ message: malformed.message })
+  const code = apiFailureCode(error.data) ?? apiFailureCode(error.responseBody)
+  if (error.statusCode === undefined) {
+    if (code) return classifyProviderFailure({ message: error.message, code })
+    if (error.isRetryable)
+      return new TransportReason({ message: error.message, url: RequestExecutor.redactUrl(error.url) })
+    return new UnknownProviderReason({ message: error.message })
+  }
+  const body = RequestExecutor.redactResponseBody(error.responseBody, {
+    url: error.url,
+    headers: error.responseHeaders ?? {},
+  })
+  return classifyProviderFailure({
+    message: error.message,
+    status: error.statusCode,
+    code,
+    retryAfterMs: retryAfterMs(error.responseHeaders),
+    http: new HttpContext({
+      request: new HttpRequestDetails({ method: "POST", url: RequestExecutor.redactUrl(error.url), headers: {} }),
+      response: new HttpResponseDetails({
+        status: error.statusCode,
+        headers: RequestExecutor.redactHeaders(error.responseHeaders ?? {}),
+      }),
+      ...body,
+    }),
+  })
+}
+
+const TRANSPORT_TIMEOUT_CODES = new Set([
+  "ETIMEDOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+])
+const TRANSPORT_CONNECTION_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "UND_ERR_SOCKET",
+])
+
+function retryAfterMs(headers: Record<string, string> | undefined) {
+  if (!headers) return undefined
+  const millis = Number(headers["retry-after-ms"])
+  if (Number.isFinite(millis)) return Math.max(0, millis)
+  const value = headers["retry-after"]
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  const date = Date.parse(value)
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now())
+}
+
+function field(error: unknown, name: string) {
+  return typeof error === "object" && error !== null ? Reflect.get(error, name) : undefined
+}
+
+function machineCode(error: unknown) {
+  const code = field(error, "code")
+  return typeof code === "string" ? code.toUpperCase() : undefined
+}
+
+function apiFailureCode(error: unknown): string | undefined {
+  if (typeof error === "string") {
+    const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(Schema.UnknownFromJsonString)(error))
+    return apiFailureCode(decoded)
+  }
+  const code = field(error, "code")
+  if (typeof code === "string") return code
+  const type = field(error, "type")
+  if (typeof type === "string" && type !== "error") return type
+  const nested = field(error, "error")
+  return nested === undefined || nested === error ? undefined : apiFailureCode(nested)
+}
+
+function apiFailureMessage(error: unknown) {
+  const message = field(error, "message")
+  if (typeof message === "string") return message
+  const nested = field(field(error, "error"), "message")
+  return typeof nested === "string" ? nested : String(error)
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function isMalformedError(error: unknown): error is Error {
+  return (
+    InvalidResponseDataError.isInstance(error) ||
+    JSONParseError.isInstance(error) ||
+    TypeValidationError.isInstance(error) ||
+    EmptyResponseBodyError.isInstance(error) ||
+    NoContentGeneratedError.isInstance(error)
+  )
 }
 
 export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: [] })

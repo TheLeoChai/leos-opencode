@@ -47,15 +47,14 @@ const isSensitiveHeaderName = (name: string) => SENSITIVE_NAME.test(name)
 
 const isSensitiveQueryName = (name: string) => isSensitiveHeaderName(name) || SHORT_QUERY_NAME.test(name)
 
-const redactHeaders = (headers: Headers.Headers, redactedNames: ReadonlyArray<string | RegExp>) =>
+export const redactHeaders = (headers: Headers.Input, redactedNames: ReadonlyArray<string | RegExp> = []) =>
   Object.fromEntries(
-    Object.entries(Headers.redact(headers, [...redactedNames, SENSITIVE_NAME])).map(([name, value]) => [
-      name,
-      String(value),
-    ]),
+    Object.entries(Headers.redact(Headers.fromInput(headers), [...redactedNames, SENSITIVE_NAME])).map(
+      ([name, value]) => [name, String(value)],
+    ),
   )
 
-const redactUrl = (value: string) => {
+export const redactUrl = (value: string) => {
   if (!URL.canParse(value)) return REDACTED
   const url = new URL(value)
   url.searchParams.forEach((_, key) => {
@@ -151,7 +150,12 @@ const responseDetails = (
     headers: redactHeaders(response.headers, redactedNames),
   })
 
-const secretValues = (request: HttpClientRequest.HttpClientRequest) => {
+interface RedactionRequest {
+  readonly url: string
+  readonly headers: Headers.Input
+}
+
+const secretValues = (request: RedactionRequest) => {
   const values = new Set<string>()
   const add = (value: string) => {
     if (value.length < 4) return
@@ -176,13 +180,13 @@ const secretValues = (request: HttpClientRequest.HttpClientRequest) => {
 // Two passes: structural (redact `"name": "value"` and `name=value` patterns
 // for any field name that looks sensitive) plus literal (replace any actual
 // secret values we sent in the request, in case the response echoes one back).
-const redactBody = (body: string, request: HttpClientRequest.HttpClientRequest) =>
+const redactBody = (body: string, request: RedactionRequest) =>
   Array.from(secretValues(request)).reduce(
     (text, secret) => text.split(secret).join(REDACTED),
     body.replace(REDACT_JSON_FIELD, `$1"${REDACTED}"`).replace(REDACT_QUERY_FIELD, `$1${REDACTED}`),
   )
 
-const responseBody = (body: string | void, request: HttpClientRequest.HttpClientRequest) => {
+export const redactResponseBody = (body: string | void, request: RedactionRequest) => {
   if (body === undefined) return {}
   const redacted = redactBody(body, request)
   if (redacted.length <= BODY_LIMIT) return { body: redacted }
@@ -198,7 +202,7 @@ const responseHttp = (input: {
   readonly request: HttpClientRequest.HttpClientRequest
   readonly response: HttpClientResponse.HttpClientResponse
   readonly redactedNames: ReadonlyArray<string | RegExp>
-  readonly body: ReturnType<typeof responseBody>
+  readonly body: ReturnType<typeof redactResponseBody>
   readonly requestId?: string | undefined
   readonly rateLimit?: HttpRateLimitDetails | undefined
 }) =>
@@ -219,7 +223,7 @@ const statusError =
       const headers = normalizedHeaders(response.headers)
       const retryAfter = retryAfterMs(headers)
       const rateLimit = rateLimitDetails(headers, retryAfter)
-      const details = responseBody(body, request)
+      const details = redactResponseBody(body, request)
       return yield* new LLMError({
         module: "RequestExecutor",
         method: "execute",
@@ -240,7 +244,32 @@ const statusError =
       })
     })
 
-const toHttpError = (redactedNames: ReadonlyArray<string | RegExp>) => (error: unknown) => {
+const TIMEOUT_CODES = new Set([
+  "ETIMEDOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+])
+
+const errorCause = (error: unknown) => {
+  if (HttpClientError.isHttpClientError(error) && "cause" in error.reason) return error.reason.cause
+  return error instanceof Error ? error.cause : undefined
+}
+
+const errorCode = (error: unknown) => {
+  if (typeof error !== "object" || error === null) return undefined
+  const code = Reflect.get(error, "code")
+  return typeof code === "string" ? code.toUpperCase() : undefined
+}
+
+const errorMessage = (error: unknown, fallback: string) => {
+  const cause = errorCause(error)
+  if (cause instanceof Error) return cause.message
+  if (error instanceof Error) return error.message
+  return fallback
+}
+
+export const mapHttpClientError = (error: unknown, redactedNames: ReadonlyArray<string | RegExp>) => {
   const transportError = (input: {
     readonly message: string
     readonly kind?: string | undefined
@@ -257,23 +286,30 @@ const toHttpError = (redactedNames: ReadonlyArray<string | RegExp>) => (error: u
       }),
     })
 
-  if (Cause.isTimeoutError(error)) {
-    return transportError({ message: error.message, kind: "Timeout" })
-  }
+  const cause = errorCause(error)
+  const code = errorCode(cause) ?? errorCode(error)
+  const request = HttpClientError.isHttpClientError(error) ? error.request : undefined
+  if (
+    Cause.isTimeoutError(error) ||
+    Cause.isTimeoutError(cause) ||
+    (error instanceof Error && error.name === "TimeoutError") ||
+    (cause instanceof Error && cause.name === "TimeoutError") ||
+    (code !== undefined && TIMEOUT_CODES.has(code))
+  )
+    return transportError({ message: errorMessage(error, "HTTP transport timed out"), kind: code ?? "Timeout", request })
   if (!HttpClientError.isHttpClientError(error)) {
-    return transportError({ message: "HTTP transport failed" })
+    return transportError({ message: errorMessage(error, "HTTP transport failed"), kind: code })
   }
-  const request = "request" in error ? error.request : undefined
   if (error.reason._tag === "TransportError") {
     return transportError({
-      message: error.reason.description ?? "HTTP transport failed",
-      kind: error.reason._tag,
+      message: error.reason.description ?? errorMessage(error, "HTTP transport failed"),
+      kind: code ?? error.reason._tag,
       request,
     })
   }
   return transportError({
-    message: `HTTP transport failed: ${error.reason._tag}`,
-    kind: error.reason._tag,
+    message: errorMessage(error, `HTTP transport failed: ${error.reason._tag}`),
+    kind: code ?? error.reason._tag,
     request,
   })
 }
@@ -287,7 +323,10 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.e
         const redactedNames = yield* Headers.CurrentRedactedNames
         return yield* http
           .execute(request)
-          .pipe(Effect.mapError(toHttpError(redactedNames)), Effect.flatMap(statusError(request, redactedNames)))
+          .pipe(
+            Effect.mapError((error) => mapHttpClientError(error, redactedNames)),
+            Effect.flatMap(statusError(request, redactedNames)),
+          )
       })
     return Service.of({
       execute: executeOnce,

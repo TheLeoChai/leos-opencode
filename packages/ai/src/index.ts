@@ -2,7 +2,7 @@ export { LLMClient } from "./route/client"
 export { Auth } from "./route/auth"
 export { Provider } from "./provider"
 export { ProviderPackage } from "./provider-package"
-export { isContextOverflow, isContextOverflowFailure } from "./provider-error"
+export { classifyProviderFailure, isContextOverflow, isContextOverflowFailure } from "./provider-error"
 export type {
   RouteModelInput,
   RouteRoutedModelInput,
