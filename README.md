@@ -1,129 +1,134 @@
 <p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
+  <br>
+  <strong>Leo's OpenCode</strong>
+  <br>
+  <sub>A long-session focused personal fork of the open source coding agent.</sub>
+  <br><br>
+  <a href="https://github.com/anomalyco/opencode">
+    <img alt="Based on OpenCode" src="https://img.shields.io/badge/based%20on-anomalyco%2Fopencode-6e56cf?style=for-the-badge">
+  </a>
+  <a href="LICENSE">
+    <img alt="MIT License" src="https://img.shields.io/badge/license-MIT-111827?style=for-the-badge">
+  </a>
+  <a href="https://github.com/TheLeoChai/leos-opencode/commits/leos-opencode">
+    <img alt="Upstream tracked" src="https://img.shields.io/badge/branch-upstream--tracked-0f766e?style=for-the-badge">
   </a>
 </p>
-<p align="center">The open source AI coding agent.</p>
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
-</p>
 
 <p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
+  <a href="#what-changed">What changed</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#staying-current">Staying current</a> ·
+  <a href="https://github.com/anomalyco/opencode">Official OpenCode</a>
 </p>
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+> [!IMPORTANT]
+> Leo's OpenCode is an independent personal fork. It is not created,
+> maintained, endorsed, sponsored, or affiliated with anomalyco or the
+> official OpenCode team. Use the upstream project for official releases,
+> support, security notices, and community documentation.
 
----
+## Why This Fork Exists
 
-### Installation
+OpenCode is already an excellent terminal coding agent. This project is a
+small, upstream-tracking playground for improvements that make long-running
+sessions easier to monitor and less likely to hit a hard context boundary.
 
-```bash
-# YOLO
-curl -fsSL https://opencode.ai/install | bash
+The goal is not to replace upstream OpenCode. The goal is to keep a focused,
+reviewable personal layer on top of it.
 
-# Package managers
-npm i -g opencode-ai@latest        # or bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS and Linux (recommended, always up to date)
-brew install opencode              # macOS and Linux (official brew formula, updated less)
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # Any OS
-nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev branch
+## What Changed
+
+<table>
+  <tr>
+    <td width="33%"><strong>More context headroom</strong><br><sub>Proactive compaction begins before the model reaches the hard context limit.</sub></td>
+    <td width="33%"><strong>Visible session navigation</strong><br><sub>The conversation scrollbar is enabled by default and remains toggleable.</sub></td>
+    <td width="33%"><strong>Upstream-first maintenance</strong><br><sub>Fork changes stay in a small branch that can be rebased onto upstream <code>dev</code>.</sub></td>
+  </tr>
+</table>
+
+### Proactive Context Compaction
+
+The fork starts automatic compaction at 70% of usable context by default and
+retains a larger recent-context budget during that proactive pass. Both values
+are configurable:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "compaction": {
+    "auto": true,
+    "threshold": 0.70,
+    "target": 0.45
+  }
+}
 ```
 
-> [!TIP]
-> Remove versions older than 0.1.x before installing.
+- `threshold` controls when automatic compaction begins. It must be greater than `0` and no greater than `1`.
+- `target` controls the fraction of usable context reserved for recent history during proactive compaction.
+- `preserve_recent_tokens`, when set, takes precedence over `target`.
 
-### Desktop App (BETA)
+### Session Scrollbar
 
-OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
+The terminal session view uses OpenTUI's native `scrollbox` and shows a
+scrollbar by default. Open the command palette and choose
+`Toggle session scrollbar` to hide or restore it.
 
-| Platform              | Download                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`, `.rpm`, or `.AppImage`     |
+## Quick Start
 
-```bash
-# macOS (Homebrew)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
-```
+This fork currently ships as a source build. It does not claim a separate npm,
+Homebrew, desktop, or signed binary release channel.
 
-#### Installation Directory
+### Requirements
 
-The install script respects the following priority order for the installation path:
+- Git
+- Bun `1.3.14` or newer
+- Credentials for at least one supported model provider
 
-1. `$OPENCODE_INSTALL_DIR` - Custom installation directory
-2. `$XDG_BIN_DIR` - XDG Base Directory Specification compliant path
-3. `$HOME/bin` - Standard user binary directory (if it exists or can be created)
-4. `$HOME/.opencode/bin` - Default fallback
+### Run From Source
 
 ```bash
-# Examples
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
+git clone --branch leos-opencode https://github.com/TheLeoChai/leos-opencode.git
+cd leos-opencode
+bun install
+bun dev
 ```
 
-### Agents
+### Build A Local Binary
 
-OpenCode includes two built-in agents you can switch between with the `Tab` key.
+```bash
+bun run --cwd packages/opencode build --single
+```
 
-- **build** - Default, full-access agent for development work
-- **plan** - Read-only agent for analysis and code exploration
-  - Denies file edits by default
-  - Asks permission before running bash commands
-  - Ideal for exploring unfamiliar codebases or planning changes
+The generated binary is written below `packages/opencode/dist/`. The exact
+directory depends on the operating system and architecture.
 
-Also included is a **general** subagent for complex searches and multistep tasks.
-This is used internally and can be invoked using `@general` in messages.
+## Staying Current
 
-Learn more about [agents](https://opencode.ai/docs/agents).
+Keep the official repository separate from the personal fork:
 
-### Documentation
+```bash
+git remote add upstream https://github.com/anomalyco/opencode.git
+git fetch upstream dev
+git rebase upstream/dev
+bun install
+bun run --cwd packages/opencode build --single
+```
 
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
+Resolve fork conflicts deliberately, especially in the session compaction
+implementation and the terminal session route. The detailed workflow lives in
+[`FORK_MAINTENANCE.md`](FORK_MAINTENANCE.md).
 
-### Contributing
+## Project Status
 
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
+This is a personal side project. APIs, defaults, and build instructions may
+change as upstream OpenCode evolves. Treat it as an experimental source fork,
+not as a drop-in replacement for the official distribution.
 
-### Building on OpenCode
+## Credits And License
 
-If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
+Leo's OpenCode is built from [OpenCode](https://github.com/anomalyco/opencode),
+maintained by anomalyco and its contributors. Upstream source, documentation,
+and assets remain attributable to their original authors.
 
----
-
-**Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+This project is distributed under the MIT License. See [`LICENSE`](LICENSE).

@@ -1,39 +1,80 @@
 # Fork Maintenance
 
-This fork has three independent customization layers:
+Leo's OpenCode keeps its customization layer small so official OpenCode
+changes remain easy to rebase.
 
-- `feature/progressive-context` contains the OpenCode source changes, including proactive compaction.
-- `C:\Users\chaih\.config\opencode\agents` and `commands` contain the global debate agents and `/debate` command.
-- `F:\Github\remote-opencode` contains the Discord companion and `start-fork.ps1` launcher.
+## Remote Layout
 
-Only the first layer needs migration when OpenCode releases a new version. The global configuration and Discord settings survive OpenCode updates unchanged.
-
-## Before Updating
-
-Commit fork changes on `feature/progressive-context`. Do not update with a dirty worktree. Keep one focused commit per customization so a conflict can be resolved and tested independently.
-
-## Update
-
-From the fork root, run:
+Use the personal repository as `origin` and the official repository as
+`upstream`:
 
 ```powershell
-.\script\update-fork.ps1 v1.18.0
+git remote rename origin upstream
+git remote add origin git@github.com:TheLeoChai/leos-opencode.git
+git remote -v
 ```
 
-The script fetches upstream tags, creates a timestamped backup branch, rebases the current feature branch on the requested tag, installs dependencies, and builds the Windows executable.
+The customization branch is `leos-opencode`. The official base branch is
+`upstream/dev`.
 
-If Git reports a conflict, resolve it, run `git add <resolved-files>`, then run `git rebase --continue`. Use `git rebase --abort` to return to the pre-update branch; the backup branch remains available either way.
+## Updating The Fork
 
-## After Updating
-
-Run the focused compaction tests:
+Do not rebase with a dirty worktree. Commit or stash local work first, then:
 
 ```powershell
+git fetch upstream --prune
+git switch leos-opencode
+git rebase upstream/dev
+bun install
+bun run --cwd packages/opencode build --single
+```
+
+Run the focused compaction tests after resolving any conflicts:
+
+```powershell
+cd packages/opencode
 bun test test/session/compaction.test.ts
 ```
 
-Then restart the Discord companion through:
+If a rebase conflicts, resolve the files, stage them, and continue:
 
 ```powershell
-F:\Github\remote-opencode\start-fork.ps1
+git add <resolved-files>
+git rebase --continue
 ```
+
+Use `git rebase --abort` only when abandoning the update. Inspect the diff
+before pushing the rebased branch:
+
+```powershell
+git diff upstream/dev...HEAD
+git status
+```
+
+## Publishing Updates
+
+The branch is intentionally kept separate from `dev`, so upstream's branch
+can remain a clean reference point. A rebase changes commit IDs; update the
+personal remote with the safer force option:
+
+```powershell
+git push --force-with-lease origin leos-opencode
+```
+
+## Windows Helpers
+
+The root `rebuild-opencode.cmd` and `rebuild-opencode.ps1` scripts build the
+current checkout's Windows binary without assuming a particular machine path.
+They refuse to replace a binary that is still running.
+
+The optional root `update-fork.ps1` helper is intended for a compiled Windows
+fork. It waits for the current process to exit, stashes local changes,
+rebases onto `upstream/dev`, rebuilds, and restores the changes. Review its
+output before accepting a rebase or resolving conflicts.
+
+## What Does Not Belong In The Repository
+
+Keep provider credentials, OAuth tokens, local databases, generated binaries,
+logs, machine-specific configuration, and private agent definitions outside
+the repository. The root `.gitignore` covers the common forms; inspect
+`git status --ignored` before publishing.

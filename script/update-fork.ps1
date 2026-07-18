@@ -16,7 +16,7 @@ if (git status --porcelain) {
   throw "Worktree is not clean. Commit or stash changes before updating the fork."
 }
 
-git fetch origin --tags
+git fetch upstream --tags
 if (-not (git tag --list $Version)) {
   throw "Upstream tag $Version was not found."
 }

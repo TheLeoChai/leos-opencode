@@ -745,6 +745,8 @@ You can control context compaction behavior through the `compaction` option.
   "compaction": {
     "auto": true,
     "prune": false,
+    "threshold": 0.7,
+    "target": 0.45,
     "reserved": 10000
   }
 }
@@ -752,6 +754,8 @@ You can control context compaction behavior through the `compaction` option.
 
 - `auto` - Automatically compact the session when context is full (default: `true`).
 - `prune` - Remove old tool outputs to save tokens (default: `false`). Set to `true` to enable pruning.
+- `threshold` - Fraction of usable context that triggers automatic compaction (default: `0.7`). Must be greater than `0` and no greater than `1`.
+- `target` - Fraction of usable context to retain as recent history during proactive compaction (default: `0.45`). Must be greater than `0` and no greater than `1`.
 - `reserved` - Token buffer for compaction. Leaves enough window to avoid overflow during compaction.
 
 ---
