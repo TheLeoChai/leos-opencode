@@ -1,5 +1,6 @@
 import type { SessionMessageAssistant, SessionMessageInfo } from "@opencode-ai/client"
 import { Keyed, Layout, Transaction } from "effect-quark"
+import { SessionContent } from "./content"
 
 const PartRefLayout = Layout.struct({
   messageID: Layout.string,
@@ -180,7 +181,11 @@ export namespace SessionTimeline {
   }
 }
 
-export function reduceSessionRows(messages: SessionMessageInfo[], inputs = new Set<string>()) {
+export function reduceSessionRows(
+  messages: SessionMessageInfo[],
+  inputs = new Set<string>(),
+  partsOf?: (message: SessionMessageAssistant & { id: string }) => readonly SessionContent.Part[],
+) {
   const isInput = (message: SessionMessageInfo) => inputs.has(message.id)
   const pendingCompactions = messages.filter((message) => message.type === "compaction" && message.status === "running")
   const pending = new Set([...pendingCompactions.map((message) => message.id), ...inputs])
@@ -195,11 +200,10 @@ export function reduceSessionRows(messages: SessionMessageInfo[], inputs = new S
       rows.push(messageRow(message.id))
       return rows
     }
-    const ordinals = { text: 0, reasoning: 0 }
-    message.content.forEach((part) => {
-      const partID = part.type === "tool" ? part.id : `${part.type}:${ordinals[part.type]++}`
+    const parts = partsOf ? partsOf(message) : SessionContent.withPartIDs(message.content)
+    parts.forEach((part) => {
       if ((part.type === "text" || part.type === "reasoning") && !part.text.trim()) return
-      append(rows, { messageID: message.id, partID }, part)
+      append(rows, { messageID: message.id, partID: part.partID }, part)
     })
     if (isTerminalFinish(message.finish) || message.error || message.retry) {
       completePrevious(rows)
@@ -237,15 +241,6 @@ function rowBoundaryMessageID(row: SessionRow, messages: Map<string, SessionMess
   if (!messageID) return undefined
   const message = messages.get(messageID)
   if (message?.type === "assistant") return message.id
-}
-
-export function resolvePart(message: SessionMessageAssistant, partID: string) {
-  const tool = message.content.find((part) => part.type === "tool" && part.id === partID)
-  if (tool) return tool
-  const match = /^(text|reasoning):(\d+)$/.exec(partID)
-  if (!match) return
-  const ordinal = Number(match[2])
-  return message.content.filter((part) => part.type === match[1])[ordinal]
 }
 
 export function isTerminalFinish(finish: string | undefined) {

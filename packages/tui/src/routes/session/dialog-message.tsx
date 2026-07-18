@@ -62,7 +62,9 @@ export function DialogMessage(props: {
               value.type === "user"
                 ? value.text
                 : value.type === "assistant"
-                  ? value.content
+                  ? data.session.message
+                      .parts(props.sessionID, props.messageID)
+                      .values()
                       .filter((content) => content.type === "text")
                       .map((content) => content.text)
                       .join("\n")

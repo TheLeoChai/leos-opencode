@@ -883,6 +883,96 @@ test("classifies live tool rows independently of their call ID", async () => {
   }
 })
 
+test("publishes streaming deltas to one part slot without touching siblings", async () => {
+  const events = createEventStream()
+  const sessionID = "session-part-slots"
+  const calls = createFetch((url) => {
+    if (url.pathname === `/api/session/${sessionID}/message`) return json({ data: [], cursor: {} })
+  }, events)
+  let data!: ReturnType<typeof useData>
+  let client!: ReturnType<typeof useClient>
+
+  function Probe() {
+    data = useData()
+    client = useClient()
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <ClientProvider api={createApi(calls.fetch)}>
+        <ProjectProvider>
+          <DataProvider>
+            <Probe />
+          </DataProvider>
+        </ProjectProvider>
+      </ClientProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    await wait(() => client.connection.status() === "connected")
+    emitEvent(events, {
+      id: "evt_slots_step",
+      created: 1,
+      type: "session.step.started",
+      durable: durable(sessionID),
+      data: {
+        sessionID,
+        assistantMessageID: "message-assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+      },
+    })
+    emitEvent(events, {
+      id: "evt_slots_tool",
+      created: 2,
+      type: "session.tool.input.started",
+      durable: durable(sessionID, 1),
+      data: { sessionID, assistantMessageID: "message-assistant", callID: "call-slots", name: "read" },
+    })
+    emitEvent(events, {
+      id: "evt_slots_text",
+      created: 3,
+      type: "session.text.started",
+      durable: durable(sessionID, 2),
+      data: { sessionID, assistantMessageID: "message-assistant", ordinal: 0 },
+    })
+    const parts = data.session.message.parts(sessionID, "message-assistant")
+    await wait(() => parts.get("text:0") !== undefined && parts.get("call-slots") !== undefined)
+
+    const publications = { text: 0, tool: 0, structure: 0 }
+    const disposers = [
+      parts.get("text:0")!.subscribe(() => publications.text++),
+      parts.get("call-slots")!.subscribe(() => publications.tool++),
+      parts.slots.subscribe(() => publications.structure++),
+    ]
+    emitEvent(events, {
+      id: "evt_slots_delta_1",
+      created: 4,
+      type: "session.text.delta",
+      data: { sessionID, assistantMessageID: "message-assistant", ordinal: 0, delta: "one" },
+    })
+    emitEvent(events, {
+      id: "evt_slots_delta_2",
+      created: 5,
+      type: "session.text.delta",
+      data: { sessionID, assistantMessageID: "message-assistant", ordinal: 0, delta: "two" },
+    })
+    await wait(() => {
+      const part = parts.get("text:0")?.()
+      return part?.type === "text" && part.text === "onetwo"
+    })
+
+    // One slot publication per delta; the sibling tool slot and the part
+    // structure never publish, independent of message size.
+    expect(publications).toEqual({ text: 2, tool: 0, structure: 0 })
+    disposers.forEach((dispose) => dispose())
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("does not publish timeline rows for duplicate streaming deltas", async () => {
   const events = createEventStream()
   const sessionID = "session-stream-metrics"
@@ -950,10 +1040,8 @@ test("does not publish timeline rows for duplicate streaming deltas", async () =
       data: { sessionID, assistantMessageID: "message-assistant", ordinal: 0, delta: "two" },
     })
     await wait(() => {
-      const message = data.session.message.get(sessionID, "message-assistant")
-      return (
-        message?.type === "assistant" && message.content.some((part) => part.type === "text" && part.text === "onetwo")
-      )
+      const part = data.session.message.parts(sessionID, "message-assistant").get("text:0")?.()
+      return part?.type === "text" && part.text === "onetwo"
     })
 
     expect(afterFirst).toEqual({ slotPublications: 0, structuralPublications: 1, equivalenceSuppressions: 0 })
@@ -2482,12 +2570,9 @@ test("settles pending tools when a live failure arrives", async () => {
     })
 
     await wait(() => {
-      const assistant = sync.session.message.get("session-1", "msg_explicit_assistant_9")
+      const part = sync.session.message.parts("session-1", "msg_explicit_assistant_9").get("call-1")?.()
       return (
-        assistant?.type === "assistant" &&
-        assistant.content[0]?.type === "tool" &&
-        assistant.content[0].state.status === "running" &&
-        assistant.content[0].state.structured.sessionID === "session-child"
+        part?.type === "tool" && part.state.status === "running" && part.state.structured.sessionID === "session-child"
       )
     })
 
@@ -2507,19 +2592,15 @@ test("settles pending tools when a live failure arrives", async () => {
     })
 
     await wait(() => {
-      const assistant = sync.session.message.get("session-1", "msg_explicit_assistant_9")
-      return (
-        assistant?.type === "assistant" &&
-        assistant.content[0]?.type === "tool" &&
-        assistant.content[0].state.status === "error"
-      )
+      const part = sync.session.message.parts("session-1", "msg_explicit_assistant_9").get("call-1")?.()
+      return part?.type === "tool" && part.state.status === "error"
     })
 
     const assistant = sync.session.message.get("session-1", "msg_explicit_assistant_9")
     expect(assistant?.type).toBe("assistant")
     if (assistant?.type !== "assistant") return
     expect(assistant.id).toBe("msg_explicit_assistant_9")
-    const tool = assistant.content[0]
+    const tool = sync.session.message.parts("session-1", "msg_explicit_assistant_9").get("call-1")?.()
     expect(tool?.type).toBe("tool")
     if (tool?.type !== "tool") return
     expect(tool.state.status).toBe("error")

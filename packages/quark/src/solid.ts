@@ -1,8 +1,27 @@
-import { For, from, type Accessor, type JSX } from "solid-js"
+import { createMemo, For, from, type Accessor, type JSX } from "solid-js"
+import type { Keyed } from "./keyed"
 import type { Readable } from "./reactivity"
 
 export function useValue<A>(readable: Readable<A>): Accessor<A> {
   return from(readable, readable())
+}
+
+/**
+ * Reactive accessor for one keyed slot. Tracks structure only until the slot
+ * exists; afterwards value changes flow through the slot alone, so unrelated
+ * structural churn cannot re-render the consumer.
+ */
+export function useSlot<A, Key>(keyed: Keyed.Keyed<A, Key>, key: () => Key): Accessor<A | undefined> {
+  const structure = useValue(keyed.slots)
+  const slot = createMemo(() => {
+    structure()
+    return keyed.get(key())
+  })
+  const value = createMemo(() => {
+    const current = slot()
+    return current ? useValue(current) : undefined
+  })
+  return () => value()?.()
 }
 
 export function KeyedFor<A>(props: {

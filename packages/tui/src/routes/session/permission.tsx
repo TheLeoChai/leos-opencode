@@ -146,9 +146,7 @@ export function PermissionPrompt(props: { request: PermissionV2Request; director
   const input = createMemo(() => {
     const tool = props.request.source
     if (!tool) return {}
-    const message = data.session.message.get(props.request.sessionID, tool.messageID)
-    if (message?.type !== "assistant") return {}
-    const part = message.content.find((part) => part.type === "tool" && part.id === tool.callID)
+    const part = data.session.message.parts(props.request.sessionID, tool.messageID).get(tool.callID)?.()
     if (part?.type === "tool" && part.state.status !== "streaming") return part.state.input
     return {}
   })
@@ -167,7 +165,9 @@ export function PermissionPrompt(props: { request: PermissionV2Request; director
               </Match>
               <Match when={true}>
                 <box paddingLeft={1} gap={1}>
-                  <text fg={themeV2.text.subdued()}>This will allow the following patterns until OpenCode is restarted</text>
+                  <text fg={themeV2.text.subdued()}>
+                    This will allow the following patterns until OpenCode is restarted
+                  </text>
                   <box>
                     <For each={props.request.save ?? []}>
                       {(pattern) => (
@@ -643,10 +643,7 @@ function Prompt<const T extends Record<string, string>>(props: {
           ]
         : []),
     ],
-    bindings: [
-      ...(props.escapeKey ? ["app.exit"] : []),
-      ...(props.fullscreen ? ["permission.prompt.fullscreen"] : []),
-    ],
+    bindings: [...(props.escapeKey ? ["app.exit"] : []), ...(props.fullscreen ? ["permission.prompt.fullscreen"] : [])],
   }))
 
   const hint = createMemo(() => (store.expanded ? "minimize" : "fullscreen"))
@@ -703,20 +700,14 @@ function Prompt<const T extends Record<string, string>>(props: {
               <box
                 paddingLeft={1}
                 paddingRight={1}
-                backgroundColor={themeV2.background.action(
-                  option === store.selected ? "focused" : "default",
-                )}
+                backgroundColor={themeV2.background.action(option === store.selected ? "focused" : "default")}
                 onMouseOver={() => setStore("selected", option)}
                 onMouseUp={() => {
                   setStore("selected", option)
                   props.onSelect(option)
                 }}
               >
-                <text
-                  fg={themeV2.text.action(
-                    option === store.selected ? "focused" : "default",
-                  )}
-                >
+                <text fg={themeV2.text.action(option === store.selected ? "focused" : "default")}>
                   {props.options[option]}
                 </text>
               </box>
@@ -726,7 +717,8 @@ function Prompt<const T extends Record<string, string>>(props: {
         <box flexDirection="row" gap={2} flexShrink={0}>
           <Show when={props.fullscreen}>
             <text fg={themeV2.text()}>
-              {shortcuts.get("permission.prompt.fullscreen")} <span style={{ fg: themeV2.text.subdued() }}>{hint()}</span>
+              {shortcuts.get("permission.prompt.fullscreen")}{" "}
+              <span style={{ fg: themeV2.text.subdued() }}>{hint()}</span>
             </text>
           </Show>
           <text fg={themeV2.text()}>

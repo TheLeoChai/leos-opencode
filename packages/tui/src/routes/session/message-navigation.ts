@@ -19,6 +19,7 @@ export function findMessageBoundary(input: {
   direction: "next" | "prev"
   children: readonly MessageChild[]
   messages: readonly SessionMessageInfo[]
+  hasText?: (messageID: string) => boolean
   scrollTop: number
   viewportY: number
   currentID?: string
@@ -35,7 +36,9 @@ export function findMessageBoundary(input: {
         return [{ id: child.id, y, top: y }]
       }
       if (input.userOnly || message.type !== "assistant") return []
-      if (!message.content.some((content) => content.type === "text" && content.text.trim())) return []
+      const hasText =
+        input.hasText?.(message.id) ?? message.content.some((content) => content.type === "text" && content.text.trim())
+      if (!hasText) return []
       const y = input.scrollTop + child.y - input.viewportY
       return [{ id: child.id, y, top: Math.max(0, y - 1) }]
     })

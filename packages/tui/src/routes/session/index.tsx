@@ -13,7 +13,8 @@ import {
   Switch,
   useContext,
 } from "solid-js"
-import { KeyedFor } from "effect-quark/solid"
+import { KeyedFor, useSlot, useValue } from "effect-quark/solid"
+import { SessionContent } from "./content"
 import path from "node:path"
 import { EOL, tmpdir } from "node:os"
 import { mkdir, writeFile } from "node:fs/promises"
@@ -74,7 +75,7 @@ import { Keymap, type KeymapCommand } from "../../context/keymap"
 import { usePathFormatter } from "../../context/path-format"
 import { useLocation } from "../../context/location"
 import { createSessionRows } from "./rows"
-import { messageBoundaryIDs, resolvePart, type PartRef, type SessionRow } from "./timeline"
+import { messageBoundaryIDs, type PartRef, type SessionRow } from "./timeline"
 import { switchLabel } from "../../util/model"
 import { findMessageBoundary, messageNavigationSlack } from "./message-navigation"
 import { stringWidth } from "../../util/string-width"
@@ -293,6 +294,11 @@ export function Session() {
       direction,
       children: scroll.getChildren(),
       messages: messages(),
+      hasText: (messageID) =>
+        data.session.message
+          .parts(route.sessionID, messageID)
+          .values()
+          .some((part) => part.type === "text" && part.text.trim()),
       scrollTop: scroll.scrollTop,
       viewportY: scroll.viewport.y,
       currentID: navigationMessage(),
@@ -662,7 +668,10 @@ export function Session() {
           return
         }
 
-        const textParts = lastAssistantMessage.content.filter((part) => part.type === "text")
+        const textParts = data.session.message
+          .parts(route.sessionID, lastAssistantMessage.id)
+          .values()
+          .filter((part) => part.type === "text")
         if (textParts.length === 0) {
           toast.show({ message: "No text parts found in last assistant message", variant: "error" })
           dialog.clear()
@@ -700,7 +709,9 @@ export function Session() {
         try {
           const sessionData = session()
           if (!sessionData) return
-          const transcript = formatSessionTranscript(sessionData, messages(), showThinking())
+          const transcript = formatSessionTranscript(sessionData, messages(), showThinking(), (messageID) =>
+            data.session.message.parts(route.sessionID, messageID).values(),
+          )
           await clipboard.write?.(transcript)
           toast.show({ message: "Session transcript copied to clipboard!", variant: "success" })
         } catch {
@@ -727,7 +738,9 @@ export function Session() {
 
           const content =
             options.format === "markdown"
-              ? formatSessionTranscript(sessionData, messages(), options.thinking)
+              ? formatSessionTranscript(sessionData, messages(), options.thinking, (messageID) =>
+                  data.session.message.parts(route.sessionID, messageID).values(),
+                )
               : await (async () => {
                   if (options.debug) {
                     const events: { readonly created: number }[] = []
@@ -915,11 +928,15 @@ export function Session() {
                   <SessionRowView
                     row={row()}
                     message={(messageID) => data.session.message.get(route.sessionID, messageID)}
+                    parts={(messageID) => data.session.message.parts(route.sessionID, messageID)}
                     boundaryID={boundaries()[index()]}
                   />
                 )}
               </KeyedFor>
-              <BackgroundToolHint messages={messages()} />
+              <BackgroundToolHint
+                messages={messages()}
+                parts={(messageID) => data.session.message.parts(route.sessionID, messageID)}
+              />
               <Show when={session()?.revert?.messageID}>
                 <RevertMessage
                   count={
@@ -1009,6 +1026,7 @@ export function Session() {
 function SessionRowView(props: {
   row: SessionRow
   message: (messageID: string) => SessionMessageInfo | undefined
+  parts: (messageID: string) => SessionContent.Parts
   boundaryID?: string
 }) {
   return (
@@ -1023,10 +1041,17 @@ function SessionRowView(props: {
           <CompactionQueued />
         </Match>
         <Match when={props.row.type === "part" ? props.row : undefined}>
-          {(row) => <SessionPartView partRef={row().ref} message={props.message} />}
+          {(row) => <SessionPartView partRef={row().ref} message={props.message} parts={props.parts} />}
         </Match>
         <Match when={props.row.type === "group" && props.row.kind === "reasoning" ? props.row : undefined}>
-          {(row) => <SessionReasoningGroupView refs={row().refs} completed={row().completed} message={props.message} />}
+          {(row) => (
+            <SessionReasoningGroupView
+              refs={row().refs}
+              completed={row().completed}
+              message={props.message}
+              parts={props.parts}
+            />
+          )}
         </Match>
         <Match when={props.row.type === "group" && props.row.kind === "exploration" ? props.row : undefined}>
           {(row) => (
@@ -1035,6 +1060,7 @@ function SessionRowView(props: {
               pending={row().pending}
               completed={row().completed}
               message={props.message}
+              parts={props.parts}
             />
           )}
         </Match>
@@ -1054,21 +1080,29 @@ function SessionRowView(props: {
   )
 }
 
-function BackgroundToolHint(props: { messages: SessionMessageInfo[] }) {
+function BackgroundToolHint(props: {
+  messages: SessionMessageInfo[]
+  parts: (messageID: string) => SessionContent.Parts
+}) {
   const { themeV2 } = useTheme()
   const shortcut = Keymap.useShortcut("session.background")
-  const visible = createMemo(() => {
-    const current = props.messages.findLast(
+  const current = createMemo(() =>
+    props.messages.findLast(
       (message): message is SessionMessageAssistant => message.type === "assistant" && !message.time.completed,
-    )
-    return (
-      current?.content.some((part) => {
+    ),
+  )
+  const parts = createMemo(() => {
+    const message = current()
+    return message ? useValue(props.parts(message.id).values) : undefined
+  })
+  const visible = createMemo(
+    () =>
+      parts()?.()?.some((part) => {
         if (part.type !== "tool" || part.state.status !== "running") return false
         const display = toolDisplay(part.name)
         return display === "shell" || display === "subagent"
-      }) ?? false
-    )
-  })
+      }) ?? false,
+  )
   return (
     <Show when={visible() && shortcut()}>
       {(value) => (
@@ -1108,13 +1142,15 @@ function SessionMessageView(props: { message: SessionMessageInfo }) {
   )
 }
 
-function SessionPartView(props: { partRef: PartRef; message: (messageID: string) => SessionMessageInfo | undefined }) {
+function SessionPartView(props: {
+  partRef: PartRef
+  message: (messageID: string) => SessionMessageInfo | undefined
+  parts: (messageID: string) => SessionContent.Parts
+}) {
   const message = createMemo(() => props.message(props.partRef.messageID))
-  const part = createMemo(() => {
-    const item = message()
-    if (item?.type !== "assistant") return
-    return resolvePart(item, props.partRef.partID)
-  })
+  // One reactive slot per part: unrelated deltas in the same message cannot
+  // re-render this row.
+  const part = useSlot(props.parts(props.partRef.messageID), () => props.partRef.partID)
   return (
     <Show when={part()}>
       {(item) => (
@@ -1142,17 +1178,26 @@ function SessionReasoningGroupView(props: {
   refs: readonly PartRef[]
   completed: boolean
   message: (messageID: string) => SessionMessageInfo | undefined
+  parts: (messageID: string) => SessionContent.Parts
 }) {
   const ctx = use()
   const { themeV2, syntax } = useTheme()
   const renderer = useRenderer()
   const [expanded, setExpanded] = createSignal(false)
   const [hover, setHover] = createSignal(false)
+  // Slot accessors are created per ref list; value changes flow through the
+  // individual slots without re-running the accessor construction.
+  const accessors = createMemo(() =>
+    props.refs.map((ref) => ({
+      ref,
+      part: useSlot(props.parts(ref.messageID), () => ref.partID),
+    })),
+  )
   const parts = createMemo(() =>
-    props.refs.flatMap((ref) => {
-      const message = props.message(ref.messageID)
+    accessors().flatMap((entry) => {
+      const message = props.message(entry.ref.messageID)
       if (message?.type !== "assistant") return []
-      const part = resolvePart(message, ref.partID)
+      const part = entry.part()
       if (part?.type !== "reasoning" || !reasoningContent(part)) return []
       return [{ message, part }]
     }),
@@ -1177,7 +1222,11 @@ function SessionReasoningGroupView(props: {
     <Show when={parts().length > 0}>
       <Show
         when={ctx.thinkingMode() === "hide"}
-        fallback={<For each={props.refs}>{(ref) => <SessionPartView partRef={ref} message={props.message} />}</For>}
+        fallback={
+          <For each={props.refs}>
+            {(ref) => <SessionPartView partRef={ref} message={props.message} parts={props.parts} />}
+          </For>
+        }
       >
         <box flexDirection="column" flexShrink={0}>
           <InlineToolRow
@@ -1213,15 +1262,14 @@ function SessionReasoningGroupView(props: {
             <box paddingLeft={3}>
               <For each={props.refs}>
                 {(ref) => {
-                  const message = createMemo(() => {
-                    const item = props.message(ref.messageID)
-                    return item?.type === "assistant" ? item : undefined
-                  })
+                  const slot = useSlot(props.parts(ref.messageID), () => ref.partID)
                   const part = createMemo(() => {
-                    const item = message()
-                    if (!item) return undefined
-                    const part = resolvePart(item, ref.partID)
-                    return part?.type === "reasoning" ? part : undefined
+                    const item = slot()
+                    return item?.type === "reasoning" ? item : undefined
+                  })
+                  const messageCompleted = createMemo(() => {
+                    const item = props.message(ref.messageID)
+                    return item?.type === "assistant" && item.time.completed !== undefined
                   })
                   const content = createMemo(() => {
                     const item = part()
@@ -1239,7 +1287,7 @@ function SessionReasoningGroupView(props: {
                           <code
                             filetype="markdown"
                             drawUnstyledText={false}
-                            streaming={part()?.time?.completed === undefined && message()?.time.completed === undefined}
+                            streaming={part()?.time?.completed === undefined && !messageCompleted()}
                             syntaxStyle={syntax()}
                             content={content()}
                             conceal={ctx.markdownMode() === "rendered"}
@@ -1264,22 +1312,27 @@ function SessionGroupView(props: {
   pending: readonly PartRef[]
   completed: boolean
   message: (messageID: string) => SessionMessageInfo | undefined
+  parts: (messageID: string) => SessionContent.Parts
 }) {
   const { themeV2 } = useTheme()
   const ctx = use()
   const renderer = useRenderer()
   const [expanded, setExpanded] = createSignal(false)
   const [hover, setHover] = createSignal(false)
-  const parts = (refs: readonly PartRef[]) =>
-    refs.flatMap((ref) => {
-      const message = props.message(ref.messageID)
-      if (message?.type !== "assistant") return []
-      const part = resolvePart(message, ref.partID)
+  // Slot accessors per ref list: tool state changes flow through individual
+  // slots; the accessor lists rebuild only when the refs themselves change.
+  const slots = (refs: () => readonly PartRef[]) =>
+    createMemo(() => refs().map((ref) => useSlot(props.parts(ref.messageID), () => ref.partID)))
+  const groupedSlots = slots(() => props.refs)
+  const pendingSlots = slots(() => props.pending)
+  const parts = (accessors: readonly (() => SessionContent.Part | undefined)[]) =>
+    accessors.flatMap((accessor) => {
+      const part = accessor()
       if (part?.type !== "tool") return []
       return [part]
     })
-  const grouped = createMemo(() => parts(props.refs))
-  const pending = createMemo(() => parts(props.pending))
+  const grouped = createMemo(() => parts(groupedSlots()))
+  const pending = createMemo(() => parts(pendingSlots()))
   const label = createMemo(() => {
     const counts = grouped().reduce<Record<string, number>>((result, part) => {
       const tool = toolDisplay(part.name)
@@ -1687,124 +1740,6 @@ function UserMessage(props: { message: SessionMessageUser }) {
         </box>
       </box>
     </Show>
-  )
-}
-
-function AssistantMessage(props: { message: SessionMessageAssistant; last: boolean }) {
-  const ctx = use()
-  const local = useLocal()
-  const { themeV2 } = useTheme().contextual("elevated")
-  const model = createMemo(
-    () =>
-      ctx
-        .models()
-        .find((model) => model.providerID === props.message.model.providerID && model.id === props.message.model.id)
-        ?.name ?? `${props.message.model.providerID}/${props.message.model.id}`,
-  )
-
-  const final = createMemo(() => {
-    return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
-  })
-
-  const duration = createMemo(() => {
-    if (!final()) return 0
-    if (!props.message.time.completed) return 0
-    return props.message.time.completed - props.message.time.created
-  })
-
-  const exploration = createMemo(() => {
-    const grouped = new Map<string, { first: boolean; parts: SessionMessageAssistantTool[]; active: boolean }>()
-    if (!ctx.groupExploration()) return grouped
-    const runs = props.message.content
-      .map((part) =>
-        part.type === "tool" &&
-        ["read", "glob", "grep"].includes(toolDisplay(part.name)) &&
-        part.state.status !== "streaming"
-          ? part
-          : undefined,
-      )
-      .reduce<SessionMessageAssistantTool[][]>(
-        (runs, part) => {
-          if (part) runs[runs.length - 1].push(part)
-          if (!part && runs[runs.length - 1].length) runs.push([])
-          return runs
-        },
-        [[]],
-      )
-      .filter((run) => run.length > 0)
-    for (const run of runs) {
-      const summary = {
-        parts: run,
-        active: false,
-      }
-      run.forEach((part, index) => grouped.set(part.id, { ...summary, first: index === 0 }))
-    }
-    return grouped
-  })
-
-  return (
-    <>
-      <For each={props.message.content}>
-        {(content, index) => (
-          <Switch>
-            <Match when={content.type === "text"}>
-              <TextPart
-                part={content as SessionMessageAssistantText}
-                last={index() === props.message.content.length - 1}
-              />
-            </Match>
-            <Match when={content.type === "reasoning"}>
-              <ReasoningPart
-                part={content as SessionMessageAssistantReasoning}
-                message={props.message}
-                last={index() === props.message.content.length - 1}
-              />
-            </Match>
-            <Match when={content.type === "tool"}>
-              <Show when={exploration().get((content as SessionMessageAssistantTool).id)?.first !== false}>
-                <Show
-                  when={exploration().get((content as SessionMessageAssistantTool).id)}
-                  fallback={<ToolPart part={content as SessionMessageAssistantTool} />}
-                >
-                  {(summary) => <ExplorationSummary {...summary()} />}
-                </Show>
-              </Show>
-            </Match>
-          </Switch>
-        )}
-      </For>
-      <Show when={props.message.error}>
-        <box
-          border={["left"]}
-          paddingTop={1}
-          paddingBottom={1}
-          paddingLeft={2}
-          backgroundColor={themeV2.background()}
-          customBorderChars={SplitBorder.customBorderChars}
-          borderColor={themeV2.text.feedback.error()}
-        >
-          <text fg={themeV2.text.subdued()}>{errorMessage(props.message.error)}</text>
-        </box>
-      </Show>
-      <AssistantRetry retry={props.message.retry} />
-      <Switch>
-        <Match when={props.last || final() || props.message.error}>
-          <box paddingLeft={3}>
-            <text>
-              <span
-                style={{ fg: props.message.error ? themeV2.text.subdued() : local.agent.color(props.message.agent) }}
-              >
-                {Locale.titlecase(props.message.agent)}
-              </span>
-              <span style={{ fg: themeV2.text.subdued() }}> · {model()}</span>
-              <Show when={duration()}>
-                <span style={{ fg: themeV2.text.subdued() }}> · {Locale.duration(duration())}</span>
-              </Show>
-            </text>
-          </box>
-        </Match>
-      </Switch>
-    </>
   )
 }
 
@@ -3012,13 +2947,18 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>
 }
 
-function formatSessionTranscript(session: SessionInfo, messages: SessionMessageInfo[], thinking: boolean) {
+function formatSessionTranscript(
+  session: SessionInfo,
+  messages: SessionMessageInfo[],
+  thinking: boolean,
+  partsOf: (messageID: string) => readonly SessionContent.Part[],
+) {
   const body = messages.flatMap((message) => {
     if (message.type === "user") return [`## User\n\n${message.text}`]
     if (message.type === "shell")
       return [`## Shell\n\n\`\`\`\n$ ${message.command}\n${message.output?.output ?? ""}\n\`\`\``]
     if (message.type !== "assistant") return []
-    const content = message.content.flatMap((item) => {
+    const content = partsOf(message.id).flatMap((item) => {
       if (item.type === "text") return [item.text]
       if (item.type === "reasoning") return thinking ? [`_Thinking:_\n\n${item.text}`] : []
       const input = typeof item.state.input === "string" ? item.state.input : JSON.stringify(item.state.input, null, 2)

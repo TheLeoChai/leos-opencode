@@ -42,7 +42,11 @@ export function createSessionRows(sessionID: Accessor<string>, options?: { reado
     const messages = data.session.message.list(sessionID())
     const inputs = new Set(data.session.input.list(sessionID()))
     const boundary = revertBoundary()
-    const rows = reduceSessionRows(boundary ? messages.filter((message) => message.id < boundary) : messages, inputs)
+    const rows = reduceSessionRows(
+      boundary ? messages.filter((message) => message.id < boundary) : messages,
+      inputs,
+      (message) => data.session.message.parts(sessionID(), message.id).values(),
+    )
     const position = rows.findIndex((row) => row.type === "message" && inputs.has(row.messageID))
     rows.splice(
       position === -1 ? rows.length : position,

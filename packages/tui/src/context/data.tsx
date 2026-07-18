@@ -19,9 +19,6 @@ import type {
   ReferenceInfo,
   SessionMessageInfo,
   SessionMessageAssistant,
-  SessionMessageAssistantReasoning,
-  SessionMessageAssistantText,
-  SessionMessageAssistantTool,
   SessionInfo,
   SessionPendingInfo,
   ShellInfo,
@@ -33,6 +30,7 @@ import { createStore, produce, reconcile } from "solid-js/store"
 import { createSimpleContext } from "./helper"
 import { useClient } from "./client"
 import { createEffect, createSignal, onCleanup } from "solid-js"
+import { SessionContent } from "../routes/session/content"
 
 export type DataSessionStatus = "idle" | "running"
 
@@ -146,6 +144,9 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
       directory: process.cwd(),
     })
     const messageIndex = new Map<string, Map<string, number>>()
+    // Assistant content lives in per-message keyed part slots, not the Solid
+    // store: streaming deltas publish one slot instead of reconciling arrays.
+    const content = SessionContent.make()
     const sync = createSync()
 
     function setSessionActive(sessionID: string, status: DataSessionStatus) {
@@ -198,20 +199,6 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
       compaction(messages: SessionMessageInfo[]) {
         const item = messages.findLast((item) => item.type === "compaction" && item.status === "running")
         return item?.type === "compaction" ? item : undefined
-      },
-      latestTool(assistant: SessionMessageAssistant | undefined, callID?: string) {
-        return assistant?.content.findLast(
-          (item): item is SessionMessageAssistantTool =>
-            item.type === "tool" && (callID === undefined || item.id === callID),
-        )
-      },
-      latestText(assistant: SessionMessageAssistant | undefined) {
-        return assistant?.content.findLast((item): item is SessionMessageAssistantText => item.type === "text")
-      },
-      latestReasoning(assistant: SessionMessageAssistant | undefined) {
-        return assistant?.content.findLast(
-          (item): item is SessionMessageAssistantReasoning => item.type === "reasoning" && !item.time?.completed,
-        )
       },
     }
 
@@ -269,6 +256,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
 
     function removeSession(sessionID: string) {
       messageIndex.delete(sessionID)
+      content.drop(sessionID)
       sync.invalidate(`session:${sessionID}`)
       sync.invalidate(`session.pending:${sessionID}`)
       sync.invalidate(`session.message:${sessionID}`)
@@ -353,6 +341,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           void client.api.session
             .message({ sessionID: event.data.sessionID, messageID: messageIDFromEvent(event.id) })
             .then((item) => {
+              if (item.type === "assistant") content.seed(event.data.sessionID, item.id, item.content)
               message.update(event.data.sessionID, (draft, index) => {
                 const position = index.get(item.id)
                 if (position === undefined) return message.append(draft, index, item)
@@ -540,143 +529,142 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             }
           })
           break
-        case "session.text.started":
-          message.update(event.data.sessionID, (draft, index) => {
-            message.assistant(draft, index, event.data.assistantMessageID)?.content.push({
-              type: "text",
-              text: "",
-            })
-          })
+        case "session.text.started": {
+          const parts = content.ensure(event.data.sessionID, event.data.assistantMessageID)
+          const partID = SessionContent.textID(event.data.ordinal)
+          if (!parts.has(partID)) parts.insert({ type: "text", text: "", partID })
           break
+        }
         case "session.text.delta":
-          message.update(event.data.sessionID, (draft, index) => {
-            const match = message.latestText(message.assistant(draft, index, event.data.assistantMessageID))
-            if (match) match.text += event.data.delta
-          })
+          content
+            .get(event.data.sessionID, event.data.assistantMessageID)
+            ?.modify(SessionContent.textID(event.data.ordinal), (part) =>
+              part.type === "text" ? { ...part, text: part.text + event.data.delta } : part,
+            )
           break
         case "session.text.ended":
-          message.update(event.data.sessionID, (draft, index) => {
-            const match = message.latestText(message.assistant(draft, index, event.data.assistantMessageID))
-            if (match) match.text = event.data.text
-          })
+          content
+            .get(event.data.sessionID, event.data.assistantMessageID)
+            ?.modify(SessionContent.textID(event.data.ordinal), (part) =>
+              part.type === "text" ? { ...part, text: event.data.text } : part,
+            )
           break
-        case "session.tool.input.started":
-          message.update(event.data.sessionID, (draft, index) => {
-            message.assistant(draft, index, event.data.assistantMessageID)?.content.push({
+        case "session.tool.input.started": {
+          const parts = content.ensure(event.data.sessionID, event.data.assistantMessageID)
+          if (!parts.has(event.data.callID))
+            parts.insert({
               type: "tool",
               id: event.data.callID,
               name: event.data.name,
               time: { created: event.created },
               state: { status: "streaming", input: "" },
+              partID: event.data.callID,
             })
-          })
           break
+        }
         case "session.tool.input.delta":
-          message.update(event.data.sessionID, (draft, index) => {
-            const match = message.latestTool(
-              message.assistant(draft, index, event.data.assistantMessageID),
-              event.data.callID,
-            )
-            if (match?.state.status === "streaming") match.state.input += event.data.delta
+          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
+            if (part.type !== "tool" || part.state.status !== "streaming") return part
+            return { ...part, state: { ...part.state, input: part.state.input + event.data.delta } }
           })
           break
         case "session.tool.input.ended":
-          message.update(event.data.sessionID, (draft, index) => {
-            const match = message.latestTool(
-              message.assistant(draft, index, event.data.assistantMessageID),
-              event.data.callID,
-            )
-            if (match?.state.status === "streaming") match.state.input = event.data.text
+          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
+            if (part.type !== "tool" || part.state.status !== "streaming") return part
+            return { ...part, state: { ...part.state, input: event.data.text } }
           })
           break
         case "session.tool.called":
-          message.update(event.data.sessionID, (draft, index) => {
-            const match = message.latestTool(
-              message.assistant(draft, index, event.data.assistantMessageID),
-              event.data.callID,
-            )
-            if (!match) return
-            match.time.ran = event.created
-            match.executed = event.data.executed
-            match.providerState = event.data.state
-            match.state = { status: "running", input: event.data.input, structured: {}, content: [] }
+          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
+            if (part.type !== "tool") return part
+            return {
+              ...part,
+              time: { ...part.time, ran: event.created },
+              executed: event.data.executed,
+              providerState: event.data.state,
+              state: { status: "running", input: event.data.input, structured: {}, content: [] },
+            }
           })
           break
         case "session.tool.progress":
-          message.update(event.data.sessionID, (draft, index) => {
-            const match = message.latestTool(
-              message.assistant(draft, index, event.data.assistantMessageID),
-              event.data.callID,
-            )
-            if (match?.state.status !== "running") return
-            match.state.structured = event.data.structured
-            match.state.content = [...event.data.content]
+          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
+            if (part.type !== "tool" || part.state.status !== "running") return part
+            return {
+              ...part,
+              state: { ...part.state, structured: event.data.structured, content: [...event.data.content] },
+            }
           })
           break
         case "session.tool.success":
-          message.update(event.data.sessionID, (draft, index) => {
-            const match = message.latestTool(
-              message.assistant(draft, index, event.data.assistantMessageID),
-              event.data.callID,
-            )
-            if (match?.state.status !== "running") return
-            match.state = {
-              status: "completed",
-              input: match.state.input,
-              structured: event.data.structured,
-              content: [...event.data.content],
-              result: event.data.result,
+          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
+            if (part.type !== "tool" || part.state.status !== "running") return part
+            return {
+              ...part,
+              state: {
+                status: "completed",
+                input: part.state.input,
+                structured: event.data.structured,
+                content: [...event.data.content],
+                result: event.data.result,
+              },
+              executed: event.data.executed || part.executed === true,
+              providerResultState: event.data.resultState,
+              time: { ...part.time, completed: event.created },
             }
-            match.executed = event.data.executed || match.executed === true
-            match.providerResultState = event.data.resultState
-            match.time.completed = event.created
           })
           break
         case "session.tool.failed":
-          message.update(event.data.sessionID, (draft, index) => {
-            const match = message.latestTool(
-              message.assistant(draft, index, event.data.assistantMessageID),
-              event.data.callID,
-            )
-            if (!match || (match.state.status !== "streaming" && match.state.status !== "running")) return
-            match.state = {
-              status: "error",
-              error: event.data.error,
-              input: typeof match.state.input === "string" ? {} : match.state.input,
-              structured: match.state.status === "running" ? match.state.structured : {},
-              content: match.state.status === "running" ? match.state.content : [],
-              result: event.data.result,
+          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
+            if (part.type !== "tool" || (part.state.status !== "streaming" && part.state.status !== "running"))
+              return part
+            return {
+              ...part,
+              state: {
+                status: "error",
+                error: event.data.error,
+                input: typeof part.state.input === "string" ? {} : part.state.input,
+                structured: part.state.status === "running" ? part.state.structured : {},
+                content: part.state.status === "running" ? part.state.content : [],
+                result: event.data.result,
+              },
+              executed: event.data.executed || part.executed === true,
+              providerResultState: event.data.resultState,
+              time: { ...part.time, completed: event.created },
             }
-            match.executed = event.data.executed || match.executed === true
-            match.providerResultState = event.data.resultState
-            match.time.completed = event.created
           })
           break
-        case "session.reasoning.started":
-          message.update(event.data.sessionID, (draft, index) => {
-            message.assistant(draft, index, event.data.assistantMessageID)?.content.push({
+        case "session.reasoning.started": {
+          const parts = content.ensure(event.data.sessionID, event.data.assistantMessageID)
+          const partID = SessionContent.reasoningID(event.data.ordinal)
+          if (!parts.has(partID))
+            parts.insert({
               type: "reasoning",
               text: "",
               state: event.data.state,
               time: { created: event.created },
+              partID,
             })
-          })
           break
+        }
         case "session.reasoning.delta":
-          message.update(event.data.sessionID, (draft, index) => {
-            const match = message.latestReasoning(message.assistant(draft, index, event.data.assistantMessageID))
-            if (match) match.text += event.data.delta
-          })
+          content
+            .get(event.data.sessionID, event.data.assistantMessageID)
+            ?.modify(SessionContent.reasoningID(event.data.ordinal), (part) =>
+              part.type === "reasoning" ? { ...part, text: part.text + event.data.delta } : part,
+            )
           break
         case "session.reasoning.ended":
-          message.update(event.data.sessionID, (draft, index) => {
-            const match = message.latestReasoning(message.assistant(draft, index, event.data.assistantMessageID))
-            if (match) {
-              match.text = event.data.text
-              match.time = { created: match.time?.created ?? event.created, completed: event.created }
-              if (event.data.state !== undefined) match.state = event.data.state
-            }
-          })
+          content
+            .get(event.data.sessionID, event.data.assistantMessageID)
+            ?.modify(SessionContent.reasoningID(event.data.ordinal), (part) => {
+              if (part.type !== "reasoning") return part
+              return {
+                ...part,
+                text: event.data.text,
+                time: { created: part.time?.created ?? event.created, completed: event.created },
+                state: event.data.state !== undefined ? event.data.state : part.state,
+              }
+            })
           break
         case "session.retry.scheduled":
           message.update(event.data.sessionID, (draft, index) => {
@@ -745,7 +733,10 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           message.update(event.data.sessionID, (draft, index) => {
             const position = draft.findIndex((item) => item.id >= event.data.to)
             if (position === -1) return
-            for (const item of draft.splice(position)) index.delete(item.id)
+            for (const item of draft.splice(position)) {
+              index.delete(item.id)
+              content.drop(event.data.sessionID, item.id)
+            }
           })
           break
         case "session.compaction.delta":
@@ -964,8 +955,15 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
                 await client.api.message.list({ sessionID, limit: 200, order: "desc" })
               ).data.toReversed()
               messageIndex.set(sessionID, new Map(messages.map((message, index) => [message.id, index])))
+              content.drop(sessionID)
+              for (const item of messages) {
+                if (item.type === "assistant") content.seed(sessionID, item.id, item.content)
+              }
               setStore("session", "message", sessionID, reconcile(messages))
             })
+          },
+          parts(sessionID: string, messageID: string) {
+            return content.ensure(sessionID, messageID)
           },
           invalidate(sessionID: string) {
             sync.invalidate(`session.message:${sessionID}`)
