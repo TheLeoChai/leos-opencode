@@ -133,6 +133,7 @@ export namespace Keyed {
 
     function publish(slot: Writable<A>, value: A) {
       const current = slot()
+      // alien-signals uses SameValueZero-compatible identity for primitive writes.
       if (current === value || equivalent(current, value)) {
         if (options.metrics) options.metrics.equivalenceSuppressions++
         return false

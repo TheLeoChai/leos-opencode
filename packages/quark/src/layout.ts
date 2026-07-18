@@ -41,8 +41,10 @@ export namespace Layout {
     readonly fields: StructFields
   }
 
-  export interface Union<Tag extends PropertyKey, Variants extends Readonly<Record<string, Field<unknown>>>>
-    extends Field<Variant<Tag, Variants>> {
+  export interface Union<
+    Tag extends PropertyKey,
+    Variants extends Readonly<Record<string, Field<unknown>>>,
+  > extends Field<Variant<Tag, Variants>> {
     readonly type: "union"
     readonly tag: Tag
     readonly variants: Variants
@@ -66,7 +68,7 @@ export namespace Layout {
     readonly equivalent: (left: A, right: A) => boolean
     /** Bitmask of changed top-level fields; 0 means equivalent. Consistent with `equivalent`. */
     readonly diff: (left: A, right: A) => number
-    /** Every known top-level property name to its change bit; immutable, key, and tag names map to 0. */
+    /** Every known top-level property name to its change bit; immutable and key names map to 0. */
     readonly bits: ReadonlyMap<PropertyKey, number>
     readonly keyOf: (value: A) => Key
     make(initial?: readonly A[], options?: { readonly metrics?: Keyed.Metrics }): Keyed.Keyed<A, Key>
@@ -215,8 +217,7 @@ export namespace Layout {
   >(layout: KeyedUnion<Name, A, Tag, Variants>, options?: CompileOptions): Plan<KeyedVariant<Name, A, Tag, Variants>, A>
   export function compile(input: unknown, options: CompileOptions = {}): unknown {
     const layout = input as
-      | Struct<Fields>
-      | KeyedUnion<PropertyKey, unknown, PropertyKey, Readonly<Record<string, Field<unknown>>>>
+      Struct<Fields> | KeyedUnion<PropertyKey, unknown, PropertyKey, Readonly<Record<string, Field<unknown>>>>
     if (layout.type === "keyed-union") {
       const model = unionDiffModel(layout.key.name, layout.tag, layout.variants)
       return makePlan(
@@ -311,17 +312,14 @@ export namespace Layout {
     initial: readonly A[],
     options?: { readonly metrics?: Keyed.Metrics },
   ): Collection<A, Key, Definitions> {
-    // The most recent publication's field diff, captured from the equivalence
-    // callback so index refresh can gate projections on it. `pending` hands a
-    // diff the collection already computed for a staged mutation to the
-    // comparator, so equivalence costs one comparison, not two.
-    let lastDiff = -1
-    let pending = -1
+    // `pending` hands a diff the collection already computed for a staged
+    // mutation to the comparator, so equivalence costs one comparison, not two.
+    let pending: number | ReadonlyMap<Key, number> | undefined
     const values = Keyed.make<A, Key>({
       key: plan.keyOf,
       equivalent(left, right) {
-        lastDiff = pending !== -1 ? pending : plan.diff(left, right)
-        return lastDiff === 0
+        const mask = typeof pending === "number" ? pending : pending?.get(plan.keyOf(left))
+        return (mask ?? plan.diff(left, right)) === 0
       },
       metrics: options?.metrics,
     })
@@ -348,15 +346,20 @@ export namespace Layout {
       },
       getOwnPropertyDescriptor(_, property) {
         trackMask = -1
-        return Reflect.getOwnPropertyDescriptor(trackTarget!, property)
+        const descriptor = Reflect.getOwnPropertyDescriptor(trackTarget!, property)
+        return descriptor && { ...descriptor, configurable: true }
       },
     })
     function tracked<T>(value: A, f: (value: A) => T) {
       trackTarget = value as Record<PropertyKey, unknown>
       trackMask = 0
-      const result = f(trackProxy as A)
-      trackTarget = undefined
-      return result
+      try {
+        const result = f(trackProxy as A)
+        return { result, reads: trackMask }
+      } finally {
+        trackTarget = undefined
+        trackMask = 0
+      }
     }
 
     // Each index entry stages user-code projections before any state mutation
@@ -394,18 +397,22 @@ export namespace Layout {
         name,
         reads: (key) => readsByKey.get(key),
         stage(key, value) {
-          const source = tracked(value, extract)
-          const reads = trackMask
           const previous = byKey.get(key)
-          const members = source === previous?.source ? previous.members : new Set(source)
-          return () => {
-            readsByKey.set(key, reads)
-            if (!previous) members.forEach((member) => adjust(member, 1))
-            if (previous && previous.members !== members) {
-              members.forEach((member) => !previous.members.has(member) && adjust(member, 1))
-              previous.members.forEach((member) => !members.has(member) && adjust(member, -1))
+          const trackedMembers = tracked(value, (candidate) => {
+            const source = extract(candidate)
+            return {
+              source,
+              members: source === previous?.source ? previous.members : new Set(source),
             }
-            byKey.set(key, { source, members })
+          })
+          return () => {
+            readsByKey.set(key, trackedMembers.reads)
+            if (!previous) trackedMembers.result.members.forEach((member) => adjust(member, 1))
+            if (previous && previous.members !== trackedMembers.result.members) {
+              trackedMembers.result.members.forEach((member) => !previous.members.has(member) && adjust(member, 1))
+              previous.members.forEach((member) => !trackedMembers.result.members.has(member) && adjust(member, -1))
+            }
+            byKey.set(key, trackedMembers.result)
           }
         },
         applyDelta(key, change) {
@@ -468,18 +475,17 @@ export namespace Layout {
         reads: (key) => readsByKey.get(key),
         stage(key, value, mode) {
           const matched = tracked(value, matches)
-          const reads = trackMask
           return (valueSlot) => {
-            readsByKey.set(key, reads)
+            readsByKey.set(key, matched.reads)
             const previous = matching.has(key)
-            if (matched) matching.add(key)
-            if (!matched) matching.delete(key)
+            if (matched.result) matching.add(key)
+            if (!matched.result) matching.delete(key)
             if (mode === "add") return
-            if (slot === valueSlot && !matched) {
+            if (slot === valueSlot && !matched.result) {
               findFirst()
               return
             }
-            if (slot !== valueSlot && !previous && matched) afterPlacement(valueSlot)
+            if (slot !== valueSlot && !previous && matched.result) afterPlacement(valueSlot)
           }
         },
         remove(key, removedSlot) {
@@ -524,19 +530,25 @@ export namespace Layout {
       // Indexes are plain data, not reactive state; the transaction exists so
       // subscribers cannot observe published values with stale indexes. With
       // no staged commits there is nothing to observe out of order.
-      if (!staged) {
-        pending = mask
-        const changed = values.update(value)
-        pending = -1
-        return changed
-      }
+      if (!staged) return publishValue()
       return Transaction.run(() => {
-        pending = mask
-        const changed = values.update(value)
-        pending = -1
+        const changed = publishValue()
         if (changed) staged.forEach((commit) => commit(slot))
         return changed
       })
+
+      function publishValue() {
+        return withPending(mask, () => values.update(value))
+      }
+    }
+
+    function withPending<T>(mask: number | ReadonlyMap<Key, number>, f: () => T) {
+      pending = mask
+      try {
+        return f()
+      } finally {
+        pending = undefined
+      }
     }
 
     const collection: Collection<A, Key, Definitions> = {
@@ -549,6 +561,7 @@ export namespace Layout {
           const value = slot()
           existing.set(plan.keyOf(value), value)
         })
+        const masks = new Map<Key, number>()
         // Stage user-code projections for new and changed values only;
         // retained equivalent values keep their index state and reads.
         const staged: Array<{ readonly key: Key; readonly commits: readonly Commit[] }> = []
@@ -559,13 +572,14 @@ export namespace Layout {
             return
           }
           const mask = plan.diff(existing.get(key)!, value)
+          masks.set(key, mask)
           if (mask === 0) return
           const commits = stageRefresh(key, value, mask)
           if (commits) staged.push({ key, commits })
         })
         const retained = new Set(keys)
         return Transaction.run(() => {
-          const changed = values.set(next)
+          const changed = withPending(masks, () => values.set(next))
           existing.forEach((_value, key) => {
             if (!retained.has(key)) entries.forEach((entry) => entry.remove(key))
           })
@@ -713,7 +727,7 @@ export namespace Layout {
     variants: Readonly<Record<string, Field<unknown>>>,
   ): UnionDiffModel {
     const bits = new Map<PropertyKey, number>()
-    bits.set(tag, 0)
+    bits.set(tag, 1)
     bits.set(keyName, 0)
     const assigned = new Map<PropertyKey, number>()
     const perVariant = new Map<string, ReadonlyArray<DiffField> | undefined>()
@@ -731,7 +745,7 @@ export namespace Layout {
           if (!assigned.has(name) && !bits.has(name)) bits.set(name, 0)
           continue
         }
-        const bit = assigned.get(name) ?? 1 << Math.min(count++, 30)
+        const bit = assigned.get(name) ?? 1 << Math.min(count++ + 1, 30)
         assigned.set(name, bit)
         bits.set(name, bit)
         fields.push({ name, field, bit })
@@ -777,7 +791,8 @@ export namespace Layout {
       const label = JSON.stringify(name)
       const fields = model.perVariant.get(name)
       if (!fields) {
-        const index = emitter.custom.push(variants[name].equivalent) - 1
+        const variant = variants[name]
+        const index = emitter.custom.push((left, right) => variant.equivalent(left, right)) - 1
         return `case ${label}: return custom[${index}](left, right) ? 0 : -1`
       }
       const statements = fields.map((field) => {
@@ -841,7 +856,7 @@ export namespace Layout {
 
   function expression(emitter: Emitter, field: Field<unknown>, left: string, right: string): string {
     if (field.immutable) return "true"
-    if (field.primitive) return `Object.is(${left}, ${right})`
+    if (field.primitive && field.equivalent === Object.is) return `Object.is(${left}, ${right})`
     const layout = field as Field<unknown> & {
       readonly type?: "struct" | "union" | "keyed-union" | "array"
       readonly fields?: Fields
@@ -876,12 +891,12 @@ export namespace Layout {
       const name = declare(emitter, layout, (fn) => {
         const property = JSON.stringify(String(layout.key!.name))
         const key = expression(emitter, layout.key!.field, `l[${property}]`, `r[${property}]`)
-        const union = declareUnion(emitter, layout.variants, layout.tag!, layout.variants!)
+        const union = declareUnion(emitter, {}, layout.tag!, layout.variants!)
         return `function ${fn}(l, r) { return ${key === "true" ? "" : `${key} && `}${union}(l, r) }`
       })
       return `${name}(${left}, ${right})`
     }
-    const index = emitter.custom.push(field.equivalent) - 1
+    const index = emitter.custom.push((left, right) => field.equivalent(left, right)) - 1
     return `custom[${index}](${left}, ${right})`
   }
 
