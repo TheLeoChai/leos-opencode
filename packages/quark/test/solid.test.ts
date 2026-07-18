@@ -71,7 +71,7 @@ describe("Solid adapter", () => {
     expect(values).toEqual(["one", "ONE", "two", "TWO"])
 
     function track(slot: Readable<{ readonly id: number; readonly value: string }>, index: number) {
-      const subscribe = slot.subscribe
+      const subscribe = slot.subscribe.bind(slot)
       slot.subscribe = (listener) => {
         active[index]++
         const dispose = subscribe(listener)
