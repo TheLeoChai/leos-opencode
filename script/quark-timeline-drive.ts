@@ -36,9 +36,9 @@ export default defineScript({
         (message) => message.type === "assistant",
       )
       if (assistant?.type !== "assistant") throw new Error("the assistant message was not projected")
-      if (assistant.content.find((part) => part.type === "reasoning")?.text !== reasoning)
+      if (!assistant.content.some((part) => part.type === "reasoning" && part.text === reasoning))
         throw new Error("the projected reasoning content did not match")
-      if (assistant.content.find((part) => part.type === "text")?.text !== response)
+      if (!assistant.content.some((part) => part.type === "text" && part.text === response))
         throw new Error("the projected text content did not match")
       if (assistant.finish !== "stop") throw new Error("the projected assistant message did not finish")
       yield* Effect.sync(() => console.log(`METRIC tui_timeline_drive_ms=${Date.now() - started}`))
