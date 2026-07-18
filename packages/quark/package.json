@@ -14,7 +14,6 @@
     "test": "bun --conditions=browser test"
   },
   "dependencies": {
-    "alien-signals": "3.2.1",
     "solid-js": "catalog:"
   }
 }

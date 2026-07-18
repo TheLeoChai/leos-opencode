@@ -7,7 +7,7 @@ import { Keyed, Layout } from "effect-quark"
  * Streaming events name their part on the wire (text/reasoning by ordinal,
  * tools by callID); each assistant message owns one keyed collection so a
  * delta publishes exactly one slot instead of reconciling a content array.
- * See docs/design/quark-message-content.md.
+ * Design record: quark repo, docs/experiments/quark-message-content.md.
  */
 export namespace SessionContent {
   type ContentPart = SessionMessageAssistant["content"][number]
