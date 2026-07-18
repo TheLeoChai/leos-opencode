@@ -1,6 +1,6 @@
 # Quark Timeline Architecture — and How It Can Be Faster
 
-An architecture review of the `opencode-quark-timeline` experiment: what the layers are, why the design is sound, and the *mechanical* reason it can beat the Solid Store timeline — with the actual code.
+An architecture review of the `opencode-quark-timeline` experiment: what the layers are, why the design is sound, and the _mechanical_ reason it can beat the Solid Store timeline — with the actual code.
 
 ## The Stack in One Picture
 
@@ -34,13 +34,13 @@ improvements.
 
 ## The Core Idea: Identity and Equivalence Are Inputs, Not Discoveries
 
-This is the entire architectural bet. Solid Store must *discover* what changed; Quark is *told* what identity and sameness mean, once, at construction:
+This is the entire architectural bet. Solid Store must _discover_ what changed; Quark is _told_ what identity and sameness mean, once, at construction:
 
 ```typescript title="packages/tui/src/routes/session/rows.ts" caption="The complete reconciliation policy is two functions"
 const state = Keyed.make({ key: rowKey, equivalent: sameRow })
 ```
 
-`rowKey` answers *"which slot is this?"* — including the subtle case where a group's key is the ref that **created** it, so refs moving to `pending` can never change identity. Keys are precomputed once at row construction with length-prefixed segments, so reconciliation pays zero key-extraction work:
+`rowKey` answers _"which slot is this?"_ — including the subtle case where a group's key is the ref that **created** it, so refs moving to `pending` can never change identity. Keys are precomputed once at row construction with length-prefixed segments, so reconciliation pays zero key-extraction work:
 
 ```typescript title="packages/tui/src/routes/session/rows.ts" caption="Keys are built once, at construction — rowKey is a field read"
 export type SessionRow = { readonly id: string } & ( /* ...variants... */ )
@@ -58,7 +58,7 @@ function rowKey(row: SessionRow) {
 }
 ```
 
-`sameRow` answers a different question: *"can any consumer tell these two values apart?"* It compares only render-relevant fields. If it says yes-they're-the-same, **nothing downstream runs at all**.
+`sameRow` answers a different question: _"can any consumer tell these two values apart?"_ It compares only render-relevant fields. If it says yes-they're-the-same, **nothing downstream runs at all**.
 
 ## Two Channels Instead of One
 
@@ -66,8 +66,8 @@ A Solid Store exposes one reactive graph; every consumer subscribes into the sam
 
 ```typescript title="packages/quark/src/keyed.ts" start=4
 export interface Keyed<A, Key> {
-  readonly slots: Readable<readonly Readable<A>[]>   // fires ONLY on insert/remove/reorder
-  readonly values: Readable<readonly A[]>            // fires on any current value change
+  readonly slots: Readable<readonly Readable<A>[]> // fires ONLY on insert/remove/reorder
+  readonly values: Readable<readonly A[]> // fires on any current value change
   has(key: Key): boolean
   get(key: Key): Readable<A> | undefined
   set(values: readonly A[]): void
@@ -98,13 +98,15 @@ group row. Trace that value update through both systems.
 ### Before: Solid Store path
 
 ```typescript caption="Old hot path — every access and write crosses a proxy"
-setRows(produce((draft) => {
-  // 1. draft is a proxy — every property read is a trap
-  // 2. finding the group row walks proxied array elements
-  // 3. the mutation writes through proxy machinery
-  // 4. Solid records fine-grained dependencies per touched path
-  append(draft, ref, part, queuedStart(draft))
-}))
+setRows(
+  produce((draft) => {
+    // 1. draft is a proxy — every property read is a trap
+    // 2. finding the group row walks proxied array elements
+    // 3. the mutation writes through proxy machinery
+    // 4. Solid records fine-grained dependencies per touched path
+    append(draft, ref, part, queuedStart(draft))
+  }),
+)
 // ...and on reconnect / revert / rebuild:
 setRows(reconcile(reduce()))
 // reconcile must re-derive identity from item references,
@@ -123,10 +125,10 @@ export function make<A, Key>(options: {
   readonly equivalent?: (left: A, right: A) => boolean
 }): Keyed<A, Key> {
   const slots = State.make<readonly Writable<A>[]>([]) // structure channel: one signal holding the slot array
-  const byKey = new Map<Key, Writable<A>>()            // identity → slot address, maintained by set/insert/remove
-  const equivalent = options.equivalent ?? Object.is   // declared sameness (sameRow in the TUI)
+  const byKey = new Map<Key, Writable<A>>() // identity → slot address, maintained by set/insert/remove
+  const equivalent = options.equivalent ?? Object.is // declared sameness (sameRow in the TUI)
   const values = Computed.make<readonly A[]>((previous) => {
-    const next = slots().map((slot) => slot())         // aggregate channel, lazy until subscribed
+    const next = slots().map((slot) => slot()) // aggregate channel, lazy until subscribed
     return same(previous, next) ? previous! : next
   })
 
@@ -135,11 +137,11 @@ export function make<A, Key>(options: {
     values,
     // ...
     update(value) {
-      const key = options.key(value)          // 1. one key extraction (a field read: row.id)
-      const slot = byKey.get(key)             // 2. one Map lookup — an address, not a search
+      const key = options.key(value) // 1. one key extraction (a field read: row.id)
+      const slot = byKey.get(key) // 2. one Map lookup — an address, not a search
       if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
       if (equivalent(slot(), value)) return false // 3. one equivalence check — early cutoff
-      slot.set(value)                         // 4. one signal write; slots is untouched
+      slot.set(value) // 4. one signal write; slots is untouched
       return true
     },
     // ...
@@ -169,20 +171,21 @@ const groupSlot = structure[0]
 
 rows.update({ ...initial, completed: true })
 
-rows.slots() === structure       // true — <For> receives no change at all
-rows.slots()[0] === groupSlot    // true — component owner survives
-groupSlot().completed === true   // true — the one subscribed row re-renders
+rows.slots() === structure // true — <For> receives no change at all
+rows.slots()[0] === groupSlot // true — component owner survives
+groupSlot().completed === true // true — the one subscribed row re-renders
 ```
 
 This is also the **beauty** mechanism, not just speed: an expanded reasoning group keeps its local state through permission repartitioning, because refs moving between `refs` and `pending` is a value change on a stable identity — never a remount.
 
 ### The membership cutoff — duplicate deltas avoid the aggregate entirely
 
-A route-scoped set contains every visible part identity, including refs nested
-inside groups. A duplicate streaming delta dies at `seenParts.has(id)` before
-reading `state.values()`. Duplicate message and footer events use `Keyed.has`
-against the collection's existing key map. For a replacement that reaches
-`update`, declared equivalence remains the final publication cutoff.
+The compiled `parts` members index contains every visible part identity,
+including refs nested inside groups. A duplicate streaming delta dies at
+`state.hasMember("parts", id)` before reading `state.values()`. Duplicate
+message and footer events use `Keyed.has` against the collection's existing key
+map. For a replacement that reaches `modify`, generated equivalence remains the
+final publication cutoff.
 
 ## More Before / After, From the Actual Diff
 
@@ -226,12 +229,12 @@ mutate(() => {
   if (state.has(footerRowID(messageID))) return
   const current = state.values()
   const index = queuedStart(current)
-  complete(current, index)                    // one state.update on the previous group, if open
+  complete(current, index) // one state.update on the previous group, if open
   insert(current, index, footerRow(messageID)) // one new slot + one structural publication
 })
 ```
 
-Same policy, but the after version *names* its effects: at most one slot value change plus one structural change, flushed together by `Transaction.run`. Nothing has to diff anything to figure that out afterward.
+Same policy, but the after version _names_ its effects: at most one slot value change plus one structural change, flushed together by `Transaction.run`. Nothing has to diff anything to figure that out afterward.
 
 ### Removing a row
 
@@ -260,18 +263,18 @@ setRows(reconcile(reduce()))
 setRows(reduce()) // → state.set(next): Map lookups + sameRow checks; unchanged rows publish nothing
 ```
 
-This is the one place the two systems do comparable O(N) work — and it's exactly the workload the checked benchmark measured. Every path above it is where Quark does structurally *less*.
+This is the one place the two systems do comparable O(N) work — and it's exactly the workload the checked benchmark measured. Every path above it is where Quark does structurally _less_.
 
 ## The Cost Ledger
 
-| Per operation | Solid Store (`produce`/`reconcile`) | Quark `Keyed` |
-| --- | --- | --- |
-| Find the row | proxied array walk / identity re-derivation | one `Map.get` |
-| Detect "no change" | proxy-graph diff per touched path | one `equivalent()` call |
-| Value change | proxy writes + per-path invalidation | one signal write → one Solid signal |
-| Structure unchanged | reconcile still walks the list | outer array identity preserved; `<For>` silent |
-| Structure changed | full reconcile | one new array; retained slots reused by reference |
-| Batch of writes | store batching | one `Transaction.run` — settled publication |
+| Per operation       | Solid Store (`produce`/`reconcile`)         | Quark `Keyed`                                     |
+| ------------------- | ------------------------------------------- | ------------------------------------------------- |
+| Find the row        | proxied array walk / identity re-derivation | one `Map.get`                                     |
+| Detect "no change"  | proxy-graph diff per touched path           | one `equivalent()` call                           |
+| Value change        | proxy writes + per-path invalidation        | one signal write → one Solid signal               |
+| Structure unchanged | reconcile still walks the list              | outer array identity preserved; `<For>` silent    |
+| Structure changed   | full reconcile                              | one new array; retained slots reused by reference |
+| Batch of writes     | store batching                              | one `Transaction.run` — settled publication       |
 
 Same asymptotics — `O(N)` for a whole-array `set` — but far fewer instructions, allocations, and invalidations per unit of change. **The speedup is a constant-factor win purchased with a stronger contract** (unique stable keys, declared equivalence), not framework magic. The checked-in claim: ~4.7× on sparse value publication, ~6.4× on reorder, at 1,000 rows.
 
@@ -281,7 +284,7 @@ Same asymptotics — `O(N)` for a whole-array `set` — but far fewer instructio
 
 - **Deep module, tiny surface.** One small `keyed.ts` module carries the whole idea; the laws (unique key, stable key, equivalence, structural cutoff, settled publication, ownership) are explicit and testable.
 - **The adapter is honest.** `useValue` is 8 lines and creates no second reconciliation system — the failure mode the design doc itself warns about.
-- **Identity-as-input is the right call** for this domain: OpenCode *has* real identities (messageID, partID) and was previously throwing that information away for Solid to rediscover.
+- **Identity-as-input is the right call** for this domain: OpenCode _has_ real identities (messageID, partID) and was previously throwing that information away for Solid to rediscover.
 - **Falsifiable framing.** The docs predict where Quark should lose. That's rare and worth preserving.
 
 ### Where the architecture leaked — all fixed during review
@@ -292,7 +295,7 @@ Every leak identified in the first pass has since been closed:
 - ~~**The aggregate channel reintroduces O(N) per delta.**~~ `boundaries` now derives from the structure channel (`rows.slots()`) and reads slot values untracked (quark reads are invisible to Solid's tracker); the raw `values` readable is no longer mirrored into Solid. Per-delta boundary cost is zero; the O(N) recompute fires only on structural change or tracked `messages()` field changes.
 - ~~**Boundary staleness as an implicit invariant.**~~ The untracked-read trick is now type-enforced: `messageBoundaryIDs` accepts `readonly BoundaryRow[]`, a projection of `Pick`ed identity-immutable fields, so a future dependence on a mutable row field is a compile error.
 - ~~**Two grouping engines.**~~ Join-vs-insert policy is unified in `appendDecision` + `groupKind`; both the batch `reduce()` path and the incremental `appendPart` path consume it, and row construction goes through shared smart constructors.
-- ~~**Benchmark not checked in / wrong hot path.**~~ `packages/quark/bench/` now exists and covers incremental `keyed.update` — including against Solid's *direct path write*, the adversarial case — plus dense updates and reorders.
+- ~~**Benchmark not checked in / wrong hot path.**~~ `packages/quark/bench/` now exists and covers incremental `keyed.update` — including against Solid's _direct path write_, the adversarial case — plus dense updates and reorders.
 - ~~**No work counters.**~~ `Keyed` accepts an optional `Metrics` sink; `OPENCODE_QUARK_METRICS=1` reports timeline counters on cleanup.
 - ~~**Opaque positioning and adapter boilerplate.**~~ `insert` and `move` now share an explicit `Position` vocabulary (`"end"`, `before`, or `after`), `get` exposes stable slot addresses, and `KeyedFor` encapsulates the two-level Solid subscription.
 

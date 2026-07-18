@@ -6,6 +6,7 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
+    "bench:timeline": "bun --conditions=browser bench/session-timeline.ts",
     "test": "bun test --timeout 30000 --only-failures",
     "typecheck": "tsgo --noEmit"
   },

@@ -131,6 +131,20 @@ describe("Keyed", () => {
     dispose()
   })
 
+  it("modifies one existing slot while preserving its key", () => {
+    const keyed = Keyed.make<Item, number>({ key: (value) => value.id })
+    keyed.set([item(1, "one")])
+    const slot = keyed.slots()[0]
+
+    expect(keyed.modify(1, (value) => ({ ...value, label: "ONE" }))).toBe(true)
+    expect(keyed.modify(1, (value) => value)).toBe(false)
+
+    expect(keyed.slots()[0]).toBe(slot)
+    expect(slot()).toEqual(item(1, "ONE"))
+    expect(() => keyed.modify(1, (value) => ({ ...value, id: 2 }))).toThrow("Keyed modify must preserve the value key")
+    expect(() => keyed.modify(2, (value) => value)).toThrow("Keyed value does not exist: 2")
+  })
+
   it("checks key membership without reading the aggregate", () => {
     const keyed = Keyed.make<Item, number>({ key: (value) => value.id })
     keyed.set([item(1, "one")])
@@ -139,6 +153,8 @@ describe("Keyed", () => {
     expect(keyed.has(2)).toBe(false)
     expect(keyed.get(1)).toBe(keyed.slots()[0])
     expect(keyed.get(2)).toBeUndefined()
+    expect(keyed.before(1)).toBeUndefined()
+    expect(keyed.after(1)).toBeUndefined()
     keyed.remove(1)
     expect(keyed.has(1)).toBe(false)
     expect(keyed.get(1)).toBeUndefined()
@@ -154,6 +170,8 @@ describe("Keyed", () => {
     expect(keyed.slots()).toEqual([one, two, three])
     const four = keyed.insert(item(4, "four"), { after: 3 })
     expect(keyed.slots()).toEqual([one, two, three, four])
+    expect(keyed.before(3)).toBe(two)
+    expect(keyed.after(3)).toBe(four)
     expect(keyed.move(3, { before: 1 })).toBe(true)
     expect(keyed.slots()).toEqual([three, one, two, four])
     expect(keyed.move(3, { before: 1 })).toBe(false)

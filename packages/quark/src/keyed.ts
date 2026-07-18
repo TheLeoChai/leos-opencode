@@ -14,11 +14,14 @@ export namespace Keyed {
     readonly values: Readable<readonly A[]>
     has(key: Key): boolean
     get(key: Key): Readable<A> | undefined
-    set(values: readonly A[]): void
+    set(values: readonly A[]): boolean
     update(value: A): boolean
+    modify(key: Key, f: (value: A) => A): boolean
     insert(value: A, position?: Position<Key>): Readable<A>
     remove(key: Key): boolean
     move(key: Key, position?: Position<Key>): boolean
+    before(key: Key): Readable<A> | undefined
+    after(key: Key): Readable<A> | undefined
   }
 
   export function make<A, Key>(options: {
@@ -44,7 +47,8 @@ export namespace Keyed {
         const retained = new Set(keys)
         if (retained.size !== keys.length) throw new Error("Keyed values must have unique keys")
 
-        Transaction.run(() => {
+        return Transaction.run(() => {
+          let changed = false
           const previous = slots()
           const reconciled = next.map((value, index) => {
             const key = keys[index]
@@ -54,12 +58,7 @@ export namespace Keyed {
               byKey.set(key, created)
               return created
             }
-            if (!equivalent(slot(), value)) {
-              slot.set(value)
-              if (options.metrics) options.metrics.slotPublications++
-            } else if (options.metrics) {
-              options.metrics.equivalenceSuppressions++
-            }
+            if (publish(slot, value)) changed = true
             return slot
           })
           byKey.forEach((_slot, key) => {
@@ -68,20 +67,23 @@ export namespace Keyed {
           if (!same(previous, reconciled)) {
             slots.set(reconciled)
             if (options.metrics) options.metrics.structuralPublications++
+            changed = true
           }
+          return changed
         })
       },
       update(value) {
         const key = options.key(value)
         const slot = byKey.get(key)
         if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
-        if (equivalent(slot(), value)) {
-          if (options.metrics) options.metrics.equivalenceSuppressions++
-          return false
-        }
-        slot.set(value)
-        if (options.metrics) options.metrics.slotPublications++
-        return true
+        return publish(slot, value)
+      },
+      modify(key, f) {
+        const slot = byKey.get(key)
+        if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
+        const value = f(slot())
+        if (byKey.get(options.key(value)) !== slot) throw new Error("Keyed modify must preserve the value key")
+        return publish(slot, value)
       },
       insert(value, position) {
         const key = options.key(value)
@@ -118,6 +120,22 @@ export namespace Keyed {
         if (options.metrics) options.metrics.structuralPublications++
         return true
       },
+      before(key) {
+        return neighbor(key, -1)
+      },
+      after(key) {
+        return neighbor(key, 1)
+      },
+    }
+
+    function publish(slot: Writable<A>, value: A) {
+      if (equivalent(slot(), value)) {
+        if (options.metrics) options.metrics.equivalenceSuppressions++
+        return false
+      }
+      slot.set(value)
+      if (options.metrics) options.metrics.slotPublications++
+      return true
     }
 
     function positionIndex(current: readonly Writable<A>[], position?: Position<Key>) {
@@ -130,6 +148,13 @@ export namespace Keyed {
       const target = byKey.get(key)
       if (!target) throw new Error(`Keyed value does not exist: ${String(key)}`)
       return current.indexOf(target)
+    }
+
+    function neighbor(key: Key, offset: -1 | 1) {
+      const slot = byKey.get(key)
+      if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
+      const current = slots()
+      return current[current.indexOf(slot) + offset]
     }
   }
 

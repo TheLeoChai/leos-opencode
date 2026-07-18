@@ -4,15 +4,17 @@ Status: experiment in progress
 
 ## Summary
 
-The V2 TUI currently stores its rendered session-row list in a Solid Store.
-This experiment changes only that owner: `createSessionRows` stores an ordered
-array of stable row slots in Quark state. Each slot owns one `SessionRow`, and
-an owner-aware adapter exposes both levels to the existing Solid renderer.
+The V2 TUI previously stored its rendered session-row list in a Solid Store.
+This experiment changes only that owner: `SessionTimeline` stores an ordered
+array of stable row slots in a compiled Quark collection. Each slot owns one
+`SessionRow`, and an owner-aware adapter exposes both levels to the existing
+Solid renderer.
 
 The event protocol, durable session data, `DataProvider`, row reduction rules,
 and `SessionRowView` remain unchanged. This boundary makes the experiment easy
-to compare and easy to remove. It does not yet move messages or secondary
-indexes into Quark collections.
+to compare and easy to remove. Message content remains in `DataProvider`;
+`SessionTimeline` owns a finite imperative index of part IDs for its current
+rows.
 
 The experiment succeeds only if all three checks pass:
 
@@ -56,10 +58,13 @@ server events
 DataProvider Solid Store
     |
     v
-createSessionRows
+createSessionRows adapter
     |
     v
-Quark State<RowSlot[]>
+SessionTimeline
+    |
+    v
+Layout.collection<SessionRow>
     |
     v
 KeyedFor outer + slot adapters
@@ -74,15 +79,17 @@ would make a regression or improvement impossible to attribute.
 
 ## Components and Responsibilities
 
-| Component                                   | Responsibility                                                                                      |
-| ------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `packages/tui/src/context/data.tsx`         | Preserve the existing server-event projection and message lookup API.                               |
-| `packages/tui/src/routes/session/rows.ts`   | Reduce loaded messages, apply incremental timeline events, and own ordered rows.                    |
-| `packages/quark/src/reactivity.ts`          | Provide synchronous state updates, subscriptions, and transaction batching.                         |
-| `packages/quark/src/keyed.ts`               | Reuse per-key slots and separate value changes from structural changes.                             |
-| `packages/quark/src/solid.ts`               | Bridge Quark readables into Solid ownership and compose stable slots with `KeyedFor`.               |
-| `packages/tui/src/routes/session/index.tsx` | Render stable row accessors through `KeyedFor` and the existing `SessionRowView` components.        |
-| `script/quark-timeline-drive.ts`            | Exercise the same streamed timeline scenario against baseline and fork binaries.                    |
+| Component                                     | Responsibility                                                                                     |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `packages/tui/src/context/data.tsx`           | Preserve the existing server-event projection and message lookup API.                              |
+| `packages/tui/src/routes/session/rows.ts`     | Translate DataProvider state and events into timeline operations; own the Solid adapter lifecycle. |
+| `packages/tui/src/routes/session/timeline.ts` | Declare row layout, reduce snapshots, cache cursors, and implement timeline domain mutations.      |
+| `packages/quark/src/layout.ts`                | Compile row keys/equivalence and maintain declared imperative collection indexes.                  |
+| `packages/quark/src/reactivity.ts`            | Provide synchronous state updates, subscriptions, and transaction batching.                        |
+| `packages/quark/src/keyed.ts`                 | Reuse per-key slots and separate value changes from structural changes.                            |
+| `packages/quark/src/solid.ts`                 | Bridge Quark readables into Solid ownership and compose stable slots with `KeyedFor`.              |
+| `packages/tui/src/routes/session/index.tsx`   | Render stable row accessors through `KeyedFor` and the existing `SessionRowView` components.       |
+| `script/quark-timeline-drive.ts`              | Exercise the same streamed timeline scenario against baseline and fork binaries.                   |
 
 ## Quark State Publishes One Synchronous Value
 
@@ -187,10 +194,11 @@ Most live events update the current row array directly:
 | Step started                                                    | Remove the previous retry footer.                               |
 | Permission changed                                              | Repartition exploration refs between visible and pending lists. |
 
-`queuedStart(rows)` finds the first queued compaction or pending message. New
-assistant parts and completed messages insert before that boundary. Pending
-user inputs append after queued work. A running compaction inserts at the start
-of the queued region.
+`SessionTimeline` caches the first queued row ID and the active incomplete group
+ID. Full replacement derives both once. Live operations maintain them as work
+is queued or promoted. New assistant parts and completed messages insert before
+the cached queue boundary; pending user inputs append after queued work; a
+running compaction becomes the new boundary.
 
 `append(rows, ref, part, index)` implements grouping:
 
@@ -214,13 +222,14 @@ because call IDs can look like generated text or reasoning IDs.
 
 The old Solid `produce` path created a mutable draft of the row list. The first
 Quark implementation also rebuilt a complete next array, then reconciled it.
-The event-native path now uses the information already present in each event:
+The event-native path now calls domain operations backed by the compiled
+collection:
 
 ```text
-value change       -> Keyed.update(row)
-new row            -> Keyed.insert(row, { before })
-removed footer     -> Keyed.remove(row.id)
-full sync / revert -> Keyed.set(nextRows)
+group change       -> state.modify(groupID, update)
+new row            -> state.insert(row, { before })
+removed footer     -> state.remove(row.id)
+full sync / revert -> state.set(nextRows)
 ```
 
 Extending or completing a group creates one new group value with copied refs
@@ -229,9 +238,11 @@ structure. Permission repartitioning first checks whether a group's visible or
 pending membership would actually change, then allocates arrays only for those
 groups.
 
-Duplicate message, part, or footer events return before a Keyed operation.
-Same-ordinal streaming deltas therefore produce no slot or structural
-publication after the first part.
+Message and footer duplicates use the keyed map. Part duplicates use the
+compiled `parts` members index and return before aggregate projection. Unique
+group appends use cached IDs and do not read `state.values()`. The append event
+also supplies the exact one-member index delta, avoiding a scan of the growing
+group; arbitrary replacements retain automatic index derivation.
 
 ## `Keyed` Preserves Row Identity
 
@@ -240,24 +251,28 @@ to preserve child ownership. A changed group value must not remount its
 `SessionRowView`, because that would reset the group's local expanded and hover
 state. `<For>` therefore receives stable Quark slots rather than row values.
 
-`Keyed.set(nextRows)` preserves ownership in four passes:
+`Keyed.set(nextRows)` preserves ownership through its persistent key-to-slot
+map:
 
 ```text
-1. Index previous slots by the semantic key of their current row.
-2. For each next row, find the previous slot with that key.
-3. Update that slot only when the rendered row fields changed.
+1. Validate the next keys.
+2. Find each retained slot through the persistent map.
+3. Update that slot only when generated row equivalence reports a change.
 4. Reuse the previous outer slot array when membership and order are unchanged.
 ```
 
 Every row receives one collision-safe length-prefixed primitive ID when it is
-created. `Keyed` reads `row.id`; reconciliation performs no serialization:
+created. `SessionRowLayout` declares that key and generates discriminated-union
+equivalence. Group `origin` is immutable metadata; `refs`, `pending`, and
+`completed` participate in equivalence. Reconciliation performs no
+serialization:
 
-| Row               | ID shape                                              |
-| ----------------- | ----------------------------------------------------- |
-| Message           | `m{length}:{messageID}`                               |
-| Queued compaction | `c{length}:{inputID}`                                 |
-| Part              | `p{message segment}{part segment}`                    |
-| Assistant footer  | `f{length}:{messageID}`                               |
+| Row               | ID shape                                               |
+| ----------------- | ------------------------------------------------------ |
+| Message           | `m{length}:{messageID}`                                |
+| Queued compaction | `c{length}:{inputID}`                                  |
+| Part              | `p{message segment}{part segment}`                     |
+| Assistant footer  | `f{length}:{messageID}`                                |
 | Group             | `g{kind}{origin message segment}{origin part segment}` |
 
 Every group records the ref that created it as immutable `origin` metadata.
@@ -269,10 +284,13 @@ partitions cannot change its ID or boundary identity. Group equivalence compares
 order changes, so Solid `<For>` does no structural work for a group-value
 update. `values` depends on both the outer list and every slot for consumers
 that require aggregate values. The TUI has no reactive `values` subscriber; it
-uses the lazy aggregate only as an internal snapshot for unique mutation paths.
+uses the lazy aggregate for bulk permission repartitioning and snapshot/test
+consumers.
 Message boundaries track structural slots and messages, then read immutable
 row identity fields untracked. A changed group publishes through its existing
 slot and preserves the mounted Solid owner without recalculating boundaries.
+The lazy aggregate is read by permission repartitioning and snapshot/test
+consumers, not by unique append paths.
 
 Slot updates and the outer-array update run inside both a Quark transaction and
 a Solid batch. The Quark transaction settles the alien-signals graph; the
@@ -285,23 +303,25 @@ from one ordering and an outer slot array from another.
 Let `R` be visible rows, `M` loaded messages, `P` assistant content parts, and
 `C` the total refs contained by visible groups.
 
-| Operation                  |                     Time |                                      Allocation |
-| -------------------------- | -----------------------: | ----------------------------------------------: |
-| Full rebuild               |           `O(M + P + R)` |        New reduction plus reconciled slot array |
-| Unique incremental append  |               `O(R + C)` | One structural array or one changed group array |
-| Duplicate part append      |                   `O(1)` |                                            None |
-| Duplicate message/footer   |                   `O(1)` |                                            None |
-| Footer removal             |                   `O(R)` |                       One structural slot array |
-| Permission repartition     |               `O(R + C)` |        Arrays only for groups whose split moves |
-| Quark-to-Solid publication | `O(1)` per changed level |  One slot write and, when required, outer write |
+| Operation                    |                     Time |                                     Allocation |
+| ---------------------------- | -----------------------: | ---------------------------------------------: |
+| Full rebuild                 |           `O(M + P + R)` |       New reduction plus reconciled slot array |
+| Active group / queue lookup  |          Expected `O(1)` |                                           None |
+| Queue boundary advancement   |                   `O(R)` |                                           None |
+| Group extension              |                   `O(G)` |     One copied group array; `O(1)` index delta |
+| Structural insertion/removal |                   `O(R)` |                     One structural slots array |
+| Duplicate part append        |                   `O(1)` |                                 One key string |
+| Duplicate message/footer     |                   `O(1)` |                                 One key string |
+| Footer removal               |                   `O(R)` |                      One structural slot array |
+| Permission repartition       |               `O(R + C)` |       Arrays only for groups whose split moves |
+| Quark-to-Solid publication   | `O(1)` per changed level | One slot write and, when required, outer write |
 
 `Keyed.has` handles message and footer membership through the collection's
-existing key map. A route-scoped `Set` contains every visible part ID, including
-refs nested inside groups. Full rebuilds repopulate it and unique appends add to
-it once. Duplicate streaming deltas therefore return before reading the lazy
-aggregate or scanning rows. Unique appends still materialize the current row
-snapshot and scan for the queued boundary; that lower-frequency path remains
-linear deliberately rather than introducing a secondary-index layer.
+existing key map. `Layout.collection` maintains every visible part ID,
+including refs nested inside groups. Full replacement rebuilds the finite index;
+inserts and arbitrary modifications derive membership automatically; the hot
+group append applies one typed member delta. Duplicate streaming deltas return
+before reading the lazy aggregate or scanning rows.
 
 ## Solid Owns the Adapter Lifecycle
 
@@ -377,7 +397,7 @@ microbenchmark. Provider simulation, terminal polling, and process scheduling
 also contribute to it. A performance decision requires repeated paired runs
 and row-update or invalidation counters in addition to this behavioral check.
 
-Three alternating smoke pairs completed successfully:
+Seven baseline/fork behavior pairs completed successfully:
 
 |                   Pair |  Baseline | Quark fork | Fork / baseline |
 | ---------------------: | --------: | ---------: | --------------: |
@@ -386,7 +406,8 @@ Three alternating smoke pairs completed successfully:
 |          3, fork first |  9,296 ms |   7,563 ms |          0.813x |
 |      4, API assertions |  4,283 ms |   3,114 ms |          0.727x |
 | 5, current `origin/v2` |  3,636 ms |   2,074 ms |          0.570x |
-| 6, current Drive API   |  2,233 ms |   1,413 ms |          0.633x |
+|   6, current Drive API |  2,233 ms |   1,413 ms |          0.633x |
+| 7, timeline extraction |    973 ms |     825 ms |          0.848x |
 
 The range is too wide to support a speed claim. These runs establish that the
 same streamed scenario renders and terminates on both implementations. They do
@@ -394,22 +415,22 @@ not establish that either implementation is faster.
 
 ## Validation Status
 
-| Check                                | Current result                                                             |
-| ------------------------------------ | -------------------------------------------------------------------------- |
-| TUI package typecheck                | Pass                                                                       |
-| Full TUI test suite                  | 267 pass, 1 skip                                                           |
-| Focused data and row tests           | 48 pass                                                                    |
-| Vendored Quark tests                 | 13 pass                                                                    |
-| Shared drive scripts typecheck       | Pass                                                                       |
-| Shared Drive behavior                | Six baseline/fork pairs pass; latest pair verifies projected content       |
-| Publication-counter trace            | Pass; exact slot/structure deltas recorded in performance model            |
-| Paired performance evidence          | Pass for controlled workloads; end-to-end wall time remains non-conclusive |
+| Check                          | Current result                                                             |
+| ------------------------------ | -------------------------------------------------------------------------- |
+| TUI package typecheck          | Pass                                                                       |
+| Full TUI test suite            | 274 pass, 1 skip                                                           |
+| Focused data and row tests     | 55 pass                                                                    |
+| Vendored Quark tests           | 24 pass                                                                    |
+| Shared drive scripts typecheck | Pass                                                                       |
+| Shared Drive behavior          | Seven baseline/fork pairs pass; latest pair verifies projected content     |
+| Publication-counter trace      | Pass; exact slot/structure deltas recorded in performance model            |
+| Paired performance evidence    | Pass for controlled workloads; end-to-end wall time remains non-conclusive |
 
-## Collection Cache Growth Is Outside This Phase
+## Reactive Query Caches Remain Outside This Phase
 
-The standalone `effect-quark` prototype includes reactive missing-key and
-secondary-index query caches without eviction. This branch vendors only Quark
-state and the Solid adapter; it does not create those caches.
+The timeline's imperative members index is finite: entries follow current rows
+and are removed synchronously. It is not a reactive query cache and renderers
+do not subscribe to it.
 
 A later message-collection phase must not delete empty cache entries while a
 live readable still references them. Safe eviction therefore needs explicit

@@ -80,37 +80,45 @@ recover identity and preserve nested owners.
 
 ## Quark Makes Identity an Input
 
-`Keyed` receives the identity and equivalence functions when the collection is
-created. In the TUI, every row carries a collision-safe primitive `id`. Groups
+`Layout.collection` compiles identity, equivalence, and indexes once when the
+timeline is created. Every row carries a collision-safe primitive `id`. Groups
 also retain their immutable origin for message-boundary projection:
 
 ```typescript
-type PartRef = {
-  messageID: string
-  partID: string
-}
+const PartRefLayout = Layout.struct({
+  messageID: Layout.string,
+  partID: Layout.string,
+})
 
-type SessionRow = { readonly id: string } & (
-  | { type: "message"; messageID: string }
-  | { type: "compaction-queued"; inputID: string }
-  | { type: "part"; ref: PartRef }
-  | {
-      type: "group"
-      kind: "reasoning"
-      origin: PartRef
-      refs: PartRef[]
-      completed: boolean
-    }
-  | {
-      type: "group"
-      kind: "exploration"
-      origin: PartRef
-      refs: PartRef[]
-      pending: PartRef[]
-      completed: boolean
-    }
-  | { type: "assistant-footer"; messageID: string }
-)
+const SessionRowLayout = Layout.keyedUnion({
+  key: Layout.key("id", Layout.string),
+  tag: "type",
+  variants: {
+    message: Layout.struct({ messageID: Layout.string }),
+    "compaction-queued": Layout.struct({ inputID: Layout.string }),
+    part: Layout.struct({ ref: PartRefLayout }),
+    group: Layout.union({
+      tag: "kind",
+      variants: {
+        reasoning: Layout.struct({
+          origin: Layout.immutable(PartRefLayout),
+          refs: Layout.array(PartRefLayout),
+          completed: Layout.boolean,
+        }),
+        exploration: Layout.struct({
+          origin: Layout.immutable(PartRefLayout),
+          refs: Layout.array(PartRefLayout),
+          pending: Layout.array(PartRefLayout),
+          completed: Layout.boolean,
+        }),
+      },
+    }),
+    "assistant-footer": Layout.struct({ messageID: Layout.string }),
+  },
+})
+
+type PartRef = Layout.Type<typeof PartRefLayout>
+type SessionRow = Layout.Type<typeof SessionRowLayout>
 ```
 
 Factories build the ID once with length-prefixed segments. Length prefixes
@@ -126,56 +134,28 @@ function groupRow(kind: "reasoning" | "exploration", origin: PartRef): SessionRo
   if (kind === "reasoning") return { id, type: "group", kind, origin, refs: [origin], completed: false }
   return { id, type: "group", kind, origin, refs: [origin], pending: [], completed: false }
 }
-
-function rowKey(row: SessionRow) {
-  return row.id
-}
 ```
 
-`sameRow` answers a different question: can consumers distinguish these two
-values for the same identity? It compares only fields that affect row
-rendering.
+Generated equivalence answers a different question: can consumers distinguish
+these two values for the same identity? The layout compares rendered fields,
+dispatches through the row and group tags, and ignores immutable `origin`.
 
 ```typescript
-function sameRow(left: SessionRow, right: SessionRow) {
-  if (left.type !== right.type) return false
+const SessionRows = Layout.collection(
+  SessionRowLayout,
+  ({ members }) => ({
+    parts: members(partIDs),
+  }),
+  { backend: "generated" },
+)
 
-  if (left.type === "message" && right.type === "message") return left.messageID === right.messageID
-
-  if (left.type === "compaction-queued" && right.type === "compaction-queued") return left.inputID === right.inputID
-
-  if (left.type === "part" && right.type === "part") return sameRef(left.ref, right.ref)
-
-  if (left.type === "assistant-footer" && right.type === "assistant-footer") return left.messageID === right.messageID
-
-  if (left.type !== "group" || right.type !== "group") return false
-  if (left.kind !== right.kind) return false
-  if (left.completed !== right.completed) return false
-  if (!sameRefs(left.refs, right.refs)) return false
-
-  if (left.kind === "reasoning" || right.kind === "reasoning") return true
-  return sameRefs(left.pending, right.pending)
-}
-
-function sameRefs(left: PartRef[], right: PartRef[]) {
-  return left.length === right.length && left.every((ref, index) => sameRef(ref, right[index]))
-}
-
-function sameRef(left: PartRef, right: PartRef) {
-  return left.messageID === right.messageID && left.partID === right.partID
-}
+const rows = SessionRows.make()
 ```
 
-Those functions form the complete reconciliation policy:
-
-```typescript
-const rows = Keyed.make<SessionRow, string>({
-  key: rowKey,
-  equivalent: sameRow,
-})
-
-rows.set(nextRows)
-```
+The `parts` index contains standalone and grouped part IDs. Duplicate stream
+deltas return through `hasMember` before aggregate projection. Arbitrary
+replacements derive membership automatically; the hot group-append path applies
+the exact one-member delta already known from the event.
 
 It exposes two reactive surfaces:
 
@@ -207,10 +187,7 @@ rows.set([initial])
 const structure = rows.slots()
 const groupSlot = structure[0]
 
-rows.update({
-  ...initial,
-  completed: true,
-})
+rows.modify(initial.id, (group) => ({ ...group, completed: true }))
 
 rows.slots() === structure // true: <For> receives no structural change
 rows.slots()[0] === groupSlot // true: component owner survives
@@ -269,13 +246,14 @@ The current algorithm is deliberately small:
 ```text
 set(next):
   1. Compute every next key and reject duplicates.
-  2. Build Map<key, previousSlot>.
+  2. Look up retained slots in the persistent key map.
   3. For each next value:
        a. Reuse the previous slot for its key, or create one.
-       b. Compare previous and next values.
+       b. Run generated equivalence over previous and next values.
        c. Write only a changed slot.
   4. Publish the outer slot array only if membership or order changed.
-  5. Flush slot and structural writes in one transaction.
+  5. Synchronize declared collection indexes.
+  6. Flush slot, index, and structural writes in one transaction.
 ```
 
 The aggregate `values` readable maps the current slots to their values. It is a
@@ -322,54 +300,31 @@ These laws are stronger than a plain `Array<object>` contract. They are also
 testable. Quark should reject a violated unique-key law and should have direct
 tests for every other law.
 
-## Fixed Layout Research Is Deferred
+## Layout Compiles Trusted Collection Metadata
 
-The standalone laboratory applies the same idea to records. The initial prototype
-used Effect Schema, but its derived equivalence measured `1.621x` the hand
-comparator's direct-update cost. Quark now experiments with a smaller trusted
-in-memory `Layout` that compiles:
+The timeline now uses Quark's trusted in-memory `Layout`. It supports the scope
+required by this experiment:
 
-- field names into numeric positions;
-- field changes into a bit mask;
-- field equivalence into precomputed functions;
-- entity keys and indexed fields into fixed metadata.
+- primitive, array, struct, discriminated-union, and keyed-union fields;
+- immutable fields excluded from rendered equivalence;
+- compiled key extraction and closure or generated equivalence;
+- imperative multi-value membership and ordered first-match indexes;
+- automatic index derivation for arbitrary replacements;
+- typed member deltas for event-native mutations that know exact changes.
 
-The minimal API marks the key in the shape itself:
+Generated nested union comparison measured `1.06x-1.10x` handwritten cost,
+versus `1.19x-1.22x` for closure Layout across three runs. Generation occurs
+once when `SessionRows` is declared. The older `1.322x` closure result motivated
+this backend; it no longer describes the production comparator.
 
-```typescript
-const ItemLayout = Layout.struct({
-  id: Layout.key(Layout.number),
-  value: Layout.number,
-})
+Automatic membership derivation is linear in an affected row's members. That
+is the safe default, but it made repeated append to one growing group roughly
+`27x-30x` the handwritten index path. The event already identifies the new
+part, so `SessionTimeline.appendPart` supplies a typed one-member delta. Generic
+completion and permission repartition retain automatic derivation.
 
-const ItemPlan = Layout.compile(ItemLayout)
-const items = ItemPlan.make([
-  { id: 1, value: 10 },
-  { id: 2, value: 20 },
-])
-
-items.update({ id: 2, value: 21 })
-```
-
-`ItemPlan` exposes the original field metadata, compiled key field, compiled
-equivalence, and collection factory. Simple struct comparison has measured
-near handwritten speed, but a representative nested session-row union measured
-`1.322x` the handwritten keyed-update cost after closure specialization.
-Generated comparison can remove more indirection, but it is optional research,
-not a requirement for this timeline experiment.
-
-A one-field record replacement can first compute the change mask, then write
-only changed field slots. An indexed-field write knows exactly which index
-buckets to remove from and add to. An entity upsert resolves directly through
-its immutable key.
-
-The static information is therefore not “the compiler knows the type.” It is
-“the runtime has already compiled the layout and the application has agreed to
-obey its laws.” Effect Schema can still validate or transform data at an
-admission boundary without participating in collection updates. None of this
-`Layout`, model, mask, index, or columnar-storage machinery is vendored into the
-TUI fork. The current landing remains the small `Keyed` abstraction plus the
-route reducer; broader promotion requires separate evidence.
+Numeric field positions, change masks, per-field reactive slots, models, and
+columnar storage remain future research. They are not required by the TUI.
 
 ## Asymptotics and Constants
 
@@ -388,11 +343,12 @@ complexity**:
 - no general nested proxy reconciliation inside Quark.
 
 For direct collection operations, stronger bounds are possible. An immutable
-key lets `Keyed.update` or `Collection.upsert` find an entity in expected `O(1)`
-time, after which work is proportional to changed fields and affected declared
-indexes rather than total collection size. The TUI now uses event-native
-`update`, `insert`, and `remove` operations for live events; full synchronization
-and revert rebuilds still use linear `set`.
+key lets `has`, `get`, `hasMember`, and `modify` find their target in expected
+`O(1)` time. Work is then proportional to the changed row, affected declared
+indexes, and any ordered structural array copy. `SessionTimeline` caches the
+active group and queued boundary IDs; inserts and removals remain `O(N)` because
+the ordered slots array must be copied. Full synchronization and revert rebuilds
+remain linear `set` operations.
 
 ## Controlled Benchmark Evidence
 
@@ -402,6 +358,9 @@ The benchmarks are checked into the fork and run directly:
 cd packages/quark
 bun run bench:keyed
 bun run bench:row-key
+
+cd ../tui
+bun run bench:timeline
 ```
 
 Each invocation interleaves and rotates variants over nine measured samples
@@ -425,20 +384,21 @@ Across these two invocations:
 The checksum was stable, and both variants performed the same next-array
 construction inside their timed workloads.
 
-The refreshed integration benchmark measures event-native updates with the
-aggregate `values` channel subscribed, plus adverse workloads. The July 17,
-2026 evidence run produced:
+The refreshed lower-level `Keyed` benchmark measures event-native updates with
+the aggregate `values` channel subscribed, plus adverse workloads. It does not
+include `SessionTimeline`, generated row equivalence, or compiled index
+maintenance. The July 17, 2026 evidence run produced:
 
-| Workload                                  |       Quark |       Solid | Quark / Solid |
-| ----------------------------------------- | ----------: | ----------: | ------------: |
-| Direct update, no subscribers, 1,000      |     46.8 ns |    761.6 ns |        0.068x |
-| Precise Solid path write, 1,000            |     54.3 ns |    327.5 ns |        0.170x |
-| Subscribed aggregate, 10 rows             |    608.0 ns |      7.4 us |        0.085x |
-| Subscribed aggregate, 100 rows            |      4.4 us |     80.0 us |        0.055x |
-| Subscribed aggregate, 1,000 rows          |     37.4 us |    703.1 us |        0.052x |
-| Subscribed aggregate, 10,000 rows         |    388.5 us |      8.1 ms |        0.044x |
-| Dense 1,000-row update                    |    270.2 us |      2.3 ms |        0.132x |
-| Unstable keys, 100 rows                   |     68.0 us |    245.2 us |        0.282x |
+| Workload                             |    Quark |    Solid | Quark / Solid |
+| ------------------------------------ | -------: | -------: | ------------: |
+| Direct update, no subscribers, 1,000 |  46.8 ns | 761.6 ns |        0.068x |
+| Precise Solid path write, 1,000      |  54.3 ns | 327.5 ns |        0.170x |
+| Subscribed aggregate, 10 rows        | 608.0 ns |   7.4 us |        0.085x |
+| Subscribed aggregate, 100 rows       |   4.4 us |  80.0 us |        0.055x |
+| Subscribed aggregate, 1,000 rows     |  37.4 us | 703.1 us |        0.052x |
+| Subscribed aggregate, 10,000 rows    | 388.5 us |   8.1 ms |        0.044x |
+| Dense 1,000-row update               | 270.2 us |   2.3 ms |        0.132x |
+| Unstable keys, 100 rows              |  68.0 us | 245.2 us |        0.282x |
 
 A second independent invocation produced paired ratios of `0.084x`,
 `0.170x`, `0.077x`, `0.059x`, `0.061x`, `0.042x`, `0.130x`, and `0.266x`
@@ -455,6 +415,24 @@ falsified prediction for this setup, not evidence that Solid can never win a
 direct-write comparison. The production TUI has no aggregate subscriber; it
 tracks structural slots and immutable boundary metadata instead.
 
+The checked-in `SessionTimeline` benchmark compares the final domain module to
+the previous handwritten `Keyed + Set` reducer mechanics and the original Solid
+Store `produce` path. Across three runs:
+
+| Workload                                              |  SessionTimeline result |
+| ----------------------------------------------------- | ----------------------: |
+| Growing reasoning-group append / handwritten Quark    |       about `1.3x-1.5x` |
+| Growing reasoning-group append / Solid `produce`      |          about `0.013x` |
+| Duplicate part in a 1,000-ref group / Solid `produce` | about `0.0004x-0.0005x` |
+
+The final module pays roughly 30%-50% over the minimal handwritten Quark path
+for compiled layout dispatch, domain policy, and maintained index ownership.
+It remains roughly 74x-79x faster than the baseline Solid append in this
+growing-group stress workload. Duplicate lookup is expected `O(1)` through the
+compiled members index; the Solid baseline scans 1,000 refs, producing an
+approximately 1,960x-2,500x stress-case difference. These are state-operation
+results, not claims about total OpenCode response latency.
+
 Key extraction was measured independently over 10,000 representative rows:
 
 | Key strategy                            |      Median | Paired ratio to JSON |
@@ -468,8 +446,8 @@ The TUI now uses the precomputed primitive ID strategy.
 ## What the Benchmark Does Not Prove
 
 The suite compares whole-array reconciliation, direct point updates, subscribed
-aggregate projection, dense changes, unstable keys, and key extraction. It
-does not prove that Quark beats:
+aggregate projection, dense changes, unstable keys, key extraction, growing
+timeline groups, and duplicate deltas. It does not prove that Quark beats:
 
 - every Solid keyed-list primitive;
 - rendering, terminal layout, or paint;
@@ -500,19 +478,18 @@ These are falsifiable predictions. The current adverse suite did not find a
 Solid win, including the newly added precise path write, but it preserves these
 cases so future changes cannot optimize only the favorable sparse path.
 
-## The Next Tests Must Measure Work, Not Just Time
+## Deterministic Tests Measure Work, Not Just Time
 
-The strongest next experiment is a single-binary A/B implementation driven by
-one deterministic event trace. It should count:
+The single-binary deterministic event trace counts:
 
-| Deterministic transition       | Slot delta | Structure delta | Observed ownership behavior                 |
-| ------------------------------ | ---------: | --------------: | ------------------------------------------- |
-| First exploration part         |         +0 |              +1 | New group slot                              |
-| Extend exploration group       |         +1 |              +0 | Existing group slot retained                |
-| Permission repartition         |         +1 |              +0 | Existing group slot retained                |
-| Insert queued user row         |         +0 |              +1 | Group remains mounted and incomplete        |
-| Complete promoted-input group  |         +1 |              +0 | Existing group slot retained                |
-| Duplicate text delta           |         +0 |              +0 | Returns before aggregate materialization    |
+| Deterministic transition       | Slot delta | Structure delta | Observed ownership behavior                  |
+| ------------------------------ | ---------: | --------------: | -------------------------------------------- |
+| First exploration part         |         +0 |              +1 | New group slot                               |
+| Extend exploration group       |         +1 |              +0 | Existing group slot retained                 |
+| Permission repartition         |         +1 |              +0 | Existing group slot retained                 |
+| Insert queued user row         |         +0 |              +1 | Group remains mounted and incomplete         |
+| Complete promoted-input group  |         +1 |              +0 | Existing group slot retained                 |
+| Duplicate text delta           |         +0 |              +0 | Returns through compiled membership index    |
 | Full unchanged two-row rebuild |         +0 |              +0 | Two equivalence suppressions, no publication |
 
 `Keyed` exposes optional counters for slot publications, structural
@@ -523,6 +500,11 @@ and completion. `does not publish timeline rows for duplicate streaming
 deltas` records the duplicate path. The direct Keyed law test records the full
 unchanged rebuild. Boundary tests independently assert that value-only changes
 do not invalidate structural boundary projection.
+
+Pure timeline tests additionally cover cached queue advancement, out-of-order
+promotion, duplicate message/footer idempotence, stable group ownership, and
+parity between event-native operations and snapshot reduction. Unique append
+uses cached IDs and never reads `state.values()`.
 
 ## Decision Rule
 
