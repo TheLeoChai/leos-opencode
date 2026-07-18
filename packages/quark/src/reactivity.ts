@@ -19,19 +19,14 @@ export namespace State {
       subs: undefined,
       subsTail: undefined,
     }
-    const read = (() => readState(node)) as Writable<A>
-    read.set = (value) => writeState(node, value)
-    read.update = (f) => {
-      // Read untracked: calling update inside a tracked evaluation must not
-      // make the caller depend on (and re-trigger from) this state.
-      const previous = swapActiveSub(undefined)
-      try {
-        writeState(node, f(readState(node)))
-      } finally {
-        activeSub = previous
-      }
-    }
-    read.subscribe = (listener) => subscribeNode(node, read, listener)
+    // Methods are shared this-based functions rather than per-instance
+    // closures: one callable and one node per state, and every call site
+    // stays monomorphic on the shared method identity.
+    const read = (() => readState(node)) as Writable<A> & Handle<StateNode<A>>
+    read.node = node
+    read.set = stateSet
+    read.update = stateUpdate
+    read.subscribe = sharedSubscribe
     return read
   }
 }
@@ -47,10 +42,34 @@ export namespace Computed {
       subs: undefined,
       subsTail: undefined,
     }
-    const read = (() => readComputed(node)) as Readable<A>
-    read.subscribe = (listener) => subscribeNode(node, read, listener)
+    const read = (() => readComputed(node)) as Readable<A> & Handle<ComputedNode<A>>
+    read.node = node
+    read.subscribe = sharedSubscribe
     return read
   }
+}
+
+interface Handle<Node> {
+  node: Node
+}
+
+function stateSet<A>(this: Handle<StateNode<A>>, value: A): void {
+  writeState(this.node, value)
+}
+
+function stateUpdate<A>(this: Handle<StateNode<A>>, f: (value: A) => A): void {
+  // Read untracked: calling update inside a tracked evaluation must not
+  // make the caller depend on (and re-trigger from) this state.
+  const previous = swapActiveSub(undefined)
+  try {
+    writeState(this.node, f(readState(this.node)))
+  } finally {
+    activeSub = previous
+  }
+}
+
+function sharedSubscribe<A>(this: (() => A) & Handle<ReactiveNode>, listener: (value: A) => void): () => void {
+  return subscribeNode(this.node, this, listener)
 }
 
 export namespace Transaction {
