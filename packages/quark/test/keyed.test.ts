@@ -127,7 +127,7 @@ describe("Keyed", () => {
     expect(keyed.slots()[1]).toBe(two)
     expect(two()).toEqual(item(2, "TWO"))
     expect(structures).toEqual([])
-    expect(() => keyed.update(item(3, "three"))).toThrow("Keyed value does not exist: 3")
+    expect(keyed.update(item(3, "three"))).toBe(false)
     dispose()
   })
 
@@ -142,7 +142,7 @@ describe("Keyed", () => {
     expect(keyed.slots()[0]).toBe(slot)
     expect(slot()).toEqual(item(1, "ONE"))
     expect(() => keyed.modify(1, (value) => ({ ...value, id: 2 }))).toThrow("Keyed modify must preserve the value key")
-    expect(() => keyed.modify(2, (value) => value)).toThrow("Keyed value does not exist: 2")
+    expect(keyed.modify(2, (value) => value)).toBe(false)
   })
 
   it("checks key membership without reading the aggregate", () => {

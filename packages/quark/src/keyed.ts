@@ -61,9 +61,12 @@ export namespace Keyed {
             if (publish(slot, value)) changed = true
             return slot
           })
-          byKey.forEach((_slot, key) => {
-            if (!retained.has(key)) byKey.delete(key)
-          })
+          // After reconciliation byKey is a superset of retained; equal sizes
+          // mean no stale keys and the sweep can be skipped.
+          if (byKey.size !== retained.size)
+            byKey.forEach((_slot, key) => {
+              if (!retained.has(key)) byKey.delete(key)
+            })
           if (!same(previous, reconciled)) {
             slots.set(reconciled)
             if (options.metrics) options.metrics.structuralPublications++
@@ -73,14 +76,13 @@ export namespace Keyed {
         })
       },
       update(value) {
-        const key = options.key(value)
-        const slot = byKey.get(key)
-        if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
+        const slot = byKey.get(options.key(value))
+        if (!slot) return false
         return publish(slot, value)
       },
       modify(key, f) {
         const slot = byKey.get(key)
-        if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
+        if (!slot) return false
         const value = f(slot())
         if (byKey.get(options.key(value)) !== slot) throw new Error("Keyed modify must preserve the value key")
         return publish(slot, value)
@@ -91,32 +93,33 @@ export namespace Keyed {
         const current = slots()
         const index = positionIndex(current, position)
         const slot = State.make(value)
-        Transaction.run(() => {
-          byKey.set(key, slot)
-          slots.set(current.toSpliced(index, 0, slot))
-          if (options.metrics) options.metrics.structuralPublications++
-        })
+        // byKey is not reactive and slots.set is a single publication, so no
+        // transaction is required here; callers batch when they need to.
+        byKey.set(key, slot)
+        slots.set(current.toSpliced(index, 0, slot))
+        if (options.metrics) options.metrics.structuralPublications++
         return slot
       },
       remove(key) {
         const slot = byKey.get(key)
         if (!slot) return false
-        Transaction.run(() => {
-          byKey.delete(key)
-          slots.set(slots().filter((candidate) => candidate !== slot))
-          if (options.metrics) options.metrics.structuralPublications++
-        })
+        byKey.delete(key)
+        slots.set(slots().filter((candidate) => candidate !== slot))
+        if (options.metrics) options.metrics.structuralPublications++
         return true
       },
       move(key, position) {
         const slot = byKey.get(key)
-        if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
+        if (!slot) return false
         const current = slots()
         const from = current.indexOf(slot)
         const target = positionIndex(current, position)
         const to = from < target ? target - 1 : target
         if (from === to) return false
-        slots.set(current.toSpliced(from, 1).toSpliced(to, 0, slot))
+        const next = current.slice()
+        next.splice(from, 1)
+        next.splice(to, 0, slot)
+        slots.set(next)
         if (options.metrics) options.metrics.structuralPublications++
         return true
       },
@@ -129,7 +132,8 @@ export namespace Keyed {
     }
 
     function publish(slot: Writable<A>, value: A) {
-      if (equivalent(slot(), value)) {
+      const current = slot()
+      if (current === value || equivalent(current, value)) {
         if (options.metrics) options.metrics.equivalenceSuppressions++
         return false
       }
@@ -152,7 +156,7 @@ export namespace Keyed {
 
     function neighbor(key: Key, offset: -1 | 1) {
       const slot = byKey.get(key)
-      if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
+      if (!slot) return undefined
       const current = slots()
       return current[current.indexOf(slot) + offset]
     }

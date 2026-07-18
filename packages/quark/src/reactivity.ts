@@ -32,7 +32,14 @@ export namespace State {
     const state = signal(initial)
     const read = (() => state()) as Writable<A>
     read.set = (value) => state(value)
-    read.update = (f) => state(f(state()))
+    read.update = (f) => {
+      // Read untracked: calling update inside an effect must not make the
+      // effect depend on (and re-trigger from) this signal.
+      const active = setActiveSub()
+      const current = state()
+      setActiveSub(active)
+      state(f(current))
+    }
     read.subscribe = (listener) => subscribe(read, listener)
     return read
   }

@@ -21,12 +21,16 @@ export namespace Layout {
   export type Type<Field> = Field extends Layout.Field<infer A> ? A : never
 
   type Fields = Readonly<Record<PropertyKey, Field<unknown>>>
-  type Value<StructFields> = { readonly [Key in keyof StructFields]: Type<StructFields[Key]> }
+  type Value<StructFields> = {
+    readonly [Key in keyof StructFields]: Type<StructFields[Key]>
+  }
   type KeyName<StructFields> = {
     readonly [Key in keyof StructFields]: StructFields[Key] extends KeyField<unknown> ? Key : never
   }[keyof StructFields]
   type Variant<Tag extends PropertyKey, Variants> = {
-    readonly [Name in keyof Variants & string]: { readonly [Key in Tag]: Name } & Type<Variants[Name]>
+    readonly [Name in keyof Variants & string]: {
+      readonly [Key in Tag]: Name
+    } & Type<Variants[Name]>
   }[keyof Variants & string]
   type KeyedVariant<Name extends PropertyKey, A, Tag extends PropertyKey, Variants> = {
     readonly [Key in Name]: A
@@ -60,6 +64,10 @@ export namespace Layout {
     readonly key: PropertyKey
     readonly fields?: Fields
     readonly equivalent: (left: A, right: A) => boolean
+    /** Bitmask of changed top-level fields; 0 means equivalent. Consistent with `equivalent`. */
+    readonly diff: (left: A, right: A) => number
+    /** Every known top-level property name to its change bit; immutable, key, and tag names map to 0. */
+    readonly bits: ReadonlyMap<PropertyKey, number>
     readonly keyOf: (value: A) => Key
     make(initial?: readonly A[], options?: { readonly metrics?: Keyed.Metrics }): Keyed.Keyed<A, Key>
   }
@@ -77,17 +85,38 @@ export namespace Layout {
   export type Index<A> = MembersIndex<A, unknown> | FirstIndex<A>
   type Indexes<A> = Readonly<Record<PropertyKey, Index<A>>>
   type MembersNames<Definitions> = {
-    readonly [Name in keyof Definitions]: Definitions[Name] extends { readonly type: "members" } ? Name : never
+    readonly [Name in keyof Definitions]: Definitions[Name] extends {
+      readonly type: "members"
+    }
+      ? Name
+      : never
   }[keyof Definitions]
   type FirstNames<Definitions> = {
-    readonly [Name in keyof Definitions]: Definitions[Name] extends { readonly type: "first" } ? Name : never
+    readonly [Name in keyof Definitions]: Definitions[Name] extends {
+      readonly type: "first"
+    }
+      ? Name
+      : never
   }[keyof Definitions]
-  type Member<Definition> = Definition extends { readonly extract: (value: never) => Iterable<infer A> } ? A : never
+  type Member<Definition> = Definition extends {
+    readonly extract: (value: never) => Iterable<infer A>
+  }
+    ? A
+    : never
   type MemberChanges<Definitions> = {
     readonly [Name in MembersNames<Definitions>]?: {
       readonly add?: readonly Member<Definitions[Name]>[]
       readonly remove?: readonly Member<Definitions[Name]>[]
     }
+  }
+
+  /**
+   * Comparator backend. "generated" (the default) compiles one specialized
+   * Function per plan; "closure" is the compatibility fallback for
+   * environments that forbid runtime code generation (CSP).
+   */
+  export interface CompileOptions {
+    readonly backend?: "closure" | "generated"
   }
 
   export interface IndexBuilder<A> {
@@ -109,14 +138,25 @@ export namespace Layout {
   export const number: Field<number> = primitive()
   export const boolean: Field<boolean> = primitive()
 
+  interface ArrayField<A> extends Field<readonly A[]> {
+    readonly type: "array"
+    readonly item: Field<A>
+  }
+
   export function array<A>(item: Field<A>): Field<readonly A[]> {
-    return make((left, right) => {
-      if (left.length !== right.length) return false
-      for (let index = 0; index < left.length; index++) {
-        if (!item.equivalent(left[index], right[index])) return false
-      }
-      return true
-    })
+    const field: ArrayField<A> = {
+      type: "array",
+      item,
+      equivalent(left, right) {
+        if (left === right) return true
+        if (left.length !== right.length) return false
+        for (let index = 0; index < left.length; index++) {
+          if (!item.equivalent(left[index], right[index])) return false
+        }
+        return true
+      },
+    }
+    return field
   }
 
   export function immutable<A>(field: Field<A>): Field<A> {
@@ -165,28 +205,30 @@ export namespace Layout {
 
   export function compile<const StructFields extends Fields>(
     layout: Struct<StructFields>,
-    options?: { readonly backend?: "closure" | "generated" },
+    options?: CompileOptions,
   ): Plan<Value<StructFields>, Value<StructFields>[KeyName<StructFields>]>
   export function compile<
     const Name extends PropertyKey,
     A,
     const Tag extends PropertyKey,
     const Variants extends Readonly<Record<string, Field<unknown>>>,
-  >(
-    layout: KeyedUnion<Name, A, Tag, Variants>,
-    options?: { readonly backend?: "closure" | "generated" },
-  ): Plan<KeyedVariant<Name, A, Tag, Variants>, A>
-  export function compile(input: unknown, options: { readonly backend?: "closure" | "generated" } = {}): unknown {
+  >(layout: KeyedUnion<Name, A, Tag, Variants>, options?: CompileOptions): Plan<KeyedVariant<Name, A, Tag, Variants>, A>
+  export function compile(input: unknown, options: CompileOptions = {}): unknown {
     const layout = input as
       | Struct<Fields>
       | KeyedUnion<PropertyKey, unknown, PropertyKey, Readonly<Record<string, Field<unknown>>>>
     if (layout.type === "keyed-union") {
+      const model = unionDiffModel(layout.key.name, layout.tag, layout.variants)
       return makePlan(
         layout.key.name,
         (value: unknown) => (value as Record<PropertyKey, unknown>)[layout.key.name],
-        (options.backend === "generated"
+        (options.backend !== "closure"
           ? generateUnion(layout.tag, layout.variants)
           : compileUnion(layout.tag, layout.variants)) as (left: unknown, right: unknown) => boolean,
+        options.backend !== "closure"
+          ? generateUnionDiff(layout.tag, layout.variants, model)
+          : compileUnionDiff(layout.tag, layout.variants, model),
+        model.bits,
       )
     }
 
@@ -195,21 +237,23 @@ export namespace Layout {
     const key = keys[0]
     const fields = Reflect.ownKeys(layout.fields)
       .filter((name) => name !== key && !layout.fields[name].immutable)
-      .map((name) => ({ name, field: layout.fields[name] }))
+      .map((name, index) => ({ name, field: layout.fields[name], bit: 1 << Math.min(index, 30) }))
+    const bits = new Map<PropertyKey, number>()
+    Reflect.ownKeys(layout.fields).forEach((name) => bits.set(name, 0))
+    fields.forEach((field) => bits.set(field.name, field.bit))
     const equivalent =
-      options.backend === "generated"
-        ? generateEquivalent<unknown>(generated(fields))
-        : compileEquivalent<unknown>(fields)
+      options.backend !== "closure" ? generateEquivalent<unknown>(fields) : compileEquivalent<unknown>(fields)
+    const diff = options.backend !== "closure" ? generateDiff<unknown>(fields) : compileDiff<unknown>(fields)
     return {
       fields: layout.fields,
-      ...makePlan(key, (value: unknown) => (value as Record<PropertyKey, unknown>)[key], equivalent),
+      ...makePlan(key, (value: unknown) => (value as Record<PropertyKey, unknown>)[key], equivalent, diff, bits),
     }
   }
 
   export function collection<const StructFields extends Fields, const Definitions extends Indexes<Value<StructFields>>>(
     layout: Struct<StructFields>,
     define: (index: IndexBuilder<Value<StructFields>>) => Definitions,
-    options?: { readonly backend?: "closure" | "generated" },
+    options?: CompileOptions,
   ): CollectionPlan<Value<StructFields>, Value<StructFields>[KeyName<StructFields>], Definitions>
   export function collection<
     const Name extends PropertyKey,
@@ -220,13 +264,9 @@ export namespace Layout {
   >(
     layout: KeyedUnion<Name, A, Tag, Variants>,
     define: (index: IndexBuilder<KeyedVariant<Name, A, Tag, Variants>>) => Definitions,
-    options?: { readonly backend?: "closure" | "generated" },
+    options?: CompileOptions,
   ): CollectionPlan<KeyedVariant<Name, A, Tag, Variants>, A, Definitions>
-  export function collection(
-    input: unknown,
-    define: unknown,
-    options?: { readonly backend?: "closure" | "generated" },
-  ): unknown {
+  export function collection(input: unknown, define: unknown, options?: CompileOptions): unknown {
     const plan = compile(input as never, options) as Plan<unknown, unknown>
     const definitions = (define as (index: IndexBuilder<unknown>) => Indexes<unknown>)({
       members: (extract) => ({ type: "members", extract }),
@@ -240,13 +280,25 @@ export namespace Layout {
     }
   }
 
-  function makePlan<A, Key>(key: PropertyKey, getKey: (value: A) => Key, equivalent: (left: A, right: A) => boolean) {
+  function makePlan<A, Key>(
+    key: PropertyKey,
+    getKey: (value: A) => Key,
+    equivalent: (left: A, right: A) => boolean,
+    diff: (left: A, right: A) => number,
+    bits: ReadonlyMap<PropertyKey, number>,
+  ) {
     return {
       key,
       equivalent,
+      diff,
+      bits,
       keyOf: getKey,
       make(initial: readonly A[] = [], options?: { readonly metrics?: Keyed.Metrics }) {
-        const values = Keyed.make({ key: getKey, equivalent, metrics: options?.metrics })
+        const values = Keyed.make({
+          key: getKey,
+          equivalent,
+          metrics: options?.metrics,
+        })
         values.set(initial)
         return values
       },
@@ -259,99 +311,300 @@ export namespace Layout {
     initial: readonly A[],
     options?: { readonly metrics?: Keyed.Metrics },
   ): Collection<A, Key, Definitions> {
-    const values = plan.make([], options)
-    type MemberEntry = {
-      readonly type: "members"
-      readonly name: PropertyKey
-      readonly extract: (value: A) => Iterable<unknown>
-      readonly counts: Map<unknown, number>
-      readonly byKey: Map<Key, { readonly source: Iterable<unknown>; readonly members: Set<unknown> }>
+    // The most recent publication's field diff, captured from the equivalence
+    // callback so index refresh can gate projections on it. `pending` hands a
+    // diff the collection already computed for a staged mutation to the
+    // comparator, so equivalence costs one comparison, not two.
+    let lastDiff = -1
+    let pending = -1
+    const values = Keyed.make<A, Key>({
+      key: plan.keyOf,
+      equivalent(left, right) {
+        lastDiff = pending !== -1 ? pending : plan.diff(left, right)
+        return lastDiff === 0
+      },
+      metrics: options?.metrics,
+    })
+
+    // Projection dependency tracker: extract/matches run against a proxy that
+    // records which top-level fields they read, as a bitmask aligned with
+    // plan.diff. Enumerating keys or reading an unknown property is
+    // conservative (all bits). Soundness: a pure projection re-reads a field
+    // only if the fields it previously read are unchanged or it is re-run.
+    let trackTarget: Record<PropertyKey, unknown> | undefined
+    let trackMask = 0
+    const trackProxy = new Proxy({} as Record<PropertyKey, unknown>, {
+      get(_, property) {
+        trackMask |= plan.bits.get(property) ?? -1
+        return trackTarget![property]
+      },
+      has(_, property) {
+        trackMask |= plan.bits.get(property) ?? -1
+        return property in trackTarget!
+      },
+      ownKeys() {
+        trackMask = -1
+        return Reflect.ownKeys(trackTarget!)
+      },
+      getOwnPropertyDescriptor(_, property) {
+        trackMask = -1
+        return Reflect.getOwnPropertyDescriptor(trackTarget!, property)
+      },
+    })
+    function tracked<T>(value: A, f: (value: A) => T) {
+      trackTarget = value as Record<PropertyKey, unknown>
+      trackMask = 0
+      const result = f(trackProxy as A)
+      trackTarget = undefined
+      return result
     }
-    type FirstEntry = {
-      readonly type: "first"
+
+    // Each index entry stages user-code projections before any state mutation
+    // (a throwing callback must not desynchronize values and indexes) and
+    // returns a commit applied after publication succeeds.
+    type Commit = (slot: Readable<A>) => void
+    type MemberChange = { readonly add?: readonly unknown[]; readonly remove?: readonly unknown[] }
+    interface Entry {
       readonly name: PropertyKey
-      readonly matches: (value: A) => boolean
-      readonly matching: Set<Key>
-      slot?: Readable<A>
+      reads(key: Key): number | undefined
+      stage(key: Key, value: A, mode: "add" | "replace"): Commit
+      applyDelta?(key: Key, change: MemberChange): void
+      remove(key: Key, slot?: Readable<A>): void
+      afterPlacement(slot: Readable<A>): void
+      afterRebuild(): void
+      member?(candidate: unknown): boolean
+      firstSlot?(): Readable<A> | undefined
     }
-    type Entry = MemberEntry | FirstEntry
-    type Inspection =
-      | {
-          readonly type: "members"
-          readonly value: { readonly source: Iterable<unknown>; readonly members: Set<unknown> }
+
+    function membersEntry(name: PropertyKey, extract: (value: A) => Iterable<unknown>): Entry {
+      const counts = new Map<unknown, number>()
+      const byKey = new Map<Key, { readonly source: Iterable<unknown>; readonly members: Set<unknown> }>()
+      const readsByKey = new Map<Key, number>()
+
+      function adjust(member: unknown, amount: 1 | -1) {
+        const count = (counts.get(member) ?? 0) + amount
+        if (count === 0) {
+          counts.delete(member)
+          return
         }
-      | { readonly type: "members-change"; readonly add: readonly unknown[]; readonly remove: readonly unknown[] }
-      | { readonly type: "first"; readonly value: boolean }
+        counts.set(member, count)
+      }
+
+      return {
+        name,
+        reads: (key) => readsByKey.get(key),
+        stage(key, value) {
+          const source = tracked(value, extract)
+          const reads = trackMask
+          const previous = byKey.get(key)
+          const members = source === previous?.source ? previous.members : new Set(source)
+          return () => {
+            readsByKey.set(key, reads)
+            if (!previous) members.forEach((member) => adjust(member, 1))
+            if (previous && previous.members !== members) {
+              members.forEach((member) => !previous.members.has(member) && adjust(member, 1))
+              previous.members.forEach((member) => !members.has(member) && adjust(member, -1))
+            }
+            byKey.set(key, { source, members })
+          }
+        },
+        applyDelta(key, change) {
+          const members = byKey.get(key)!.members
+          change.remove?.forEach((member) => {
+            if (members.delete(member)) adjust(member, -1)
+          })
+          change.add?.forEach((member) => {
+            if (members.has(member)) return
+            members.add(member)
+            adjust(member, 1)
+          })
+          // The set was mutated in place: poison the source-identity check and
+          // drop observed reads so the next non-delta projection recomputes.
+          byKey.set(key, { source: members, members })
+          readsByKey.delete(key)
+        },
+        remove(key) {
+          byKey.get(key)?.members.forEach((member) => adjust(member, -1))
+          byKey.delete(key)
+          readsByKey.delete(key)
+        },
+        afterPlacement() {},
+        afterRebuild() {},
+        member: (candidate) => counts.has(candidate),
+      }
+    }
+
+    function firstEntry(name: PropertyKey, matches: (value: A) => boolean): Entry {
+      const matching = new Set<Key>()
+      const readsByKey = new Map<Key, number>()
+      let slot: Readable<A> | undefined
+
+      function findFirst() {
+        slot = values.slots().find((candidate) => matching.has(plan.keyOf(candidate())))
+      }
+
+      function afterPlacement(candidate: Readable<A>) {
+        if (!matching.has(plan.keyOf(candidate()))) return
+        if (!slot) {
+          slot = candidate
+          return
+        }
+        if (slot === candidate) {
+          findFirst()
+          return
+        }
+        // Single pass: whichever of the two slots appears first wins.
+        for (const current of values.slots()) {
+          if (current === candidate) {
+            slot = candidate
+            return
+          }
+          if (current === slot) return
+        }
+      }
+
+      return {
+        name,
+        reads: (key) => readsByKey.get(key),
+        stage(key, value, mode) {
+          const matched = tracked(value, matches)
+          const reads = trackMask
+          return (valueSlot) => {
+            readsByKey.set(key, reads)
+            const previous = matching.has(key)
+            if (matched) matching.add(key)
+            if (!matched) matching.delete(key)
+            if (mode === "add") return
+            if (slot === valueSlot && !matched) {
+              findFirst()
+              return
+            }
+            if (slot !== valueSlot && !previous && matched) afterPlacement(valueSlot)
+          }
+        },
+        remove(key, removedSlot) {
+          matching.delete(key)
+          readsByKey.delete(key)
+          if (removedSlot && slot === removedSlot) findFirst()
+        },
+        afterPlacement,
+        afterRebuild: findFirst,
+        firstSlot: () => slot,
+      }
+    }
+
     const entries: Entry[] = Reflect.ownKeys(definitions).map((name) => {
       const definition = definitions[name]
-      if (definition.type === "members") {
-        return { type: "members", name, extract: definition.extract, counts: new Map(), byKey: new Map() }
-      }
-      return { type: "first", name, matches: definition.matches, matching: new Set() }
+      if (definition.type === "members") return membersEntry(name, definition.extract)
+      return firstEntry(name, definition.matches)
     })
     const byName = new Map(entries.map((entry) => [entry.name, entry]))
-    const emptyMembers: readonly unknown[] = []
+
+    // Stage refresh work for one changed value: explicit member deltas win,
+    // then projections whose observed reads are disjoint from the change are
+    // skipped entirely. Returns undefined when no index work is required.
+    function stageRefresh(key: Key, value: A, mask: number, changes?: unknown) {
+      const record = changes as Readonly<Record<PropertyKey, MemberChange | undefined>> | undefined
+      let staged: Commit[] | undefined
+      for (const entry of entries) {
+        const change = record?.[entry.name]
+        if (change && entry.applyDelta) {
+          const delta = entry.applyDelta
+          ;(staged ??= []).push(() => delta(key, change))
+          continue
+        }
+        const reads = entry.reads(key)
+        if (reads !== undefined && (mask & reads) === 0) continue
+        ;(staged ??= []).push(entry.stage(key, value, "replace"))
+      }
+      return staged
+    }
+
+    function publishStaged(value: A, mask: number, staged: readonly Commit[] | undefined, slot: Readable<A>) {
+      // Indexes are plain data, not reactive state; the transaction exists so
+      // subscribers cannot observe published values with stale indexes. With
+      // no staged commits there is nothing to observe out of order.
+      if (!staged) {
+        pending = mask
+        const changed = values.update(value)
+        pending = -1
+        return changed
+      }
+      return Transaction.run(() => {
+        pending = mask
+        const changed = values.update(value)
+        pending = -1
+        if (changed) staged.forEach((commit) => commit(slot))
+        return changed
+      })
+    }
 
     const collection: Collection<A, Key, Definitions> = {
       ...values,
       set(next) {
         const keys = next.map(plan.keyOf)
-        if (new Set(keys).size !== keys.length) return values.set(next)
-        const prepared = new Map(
-          next.map((value, index) => {
-            const key = keys[index]
-            const previous = values.get(key)?.()
-            return [key, previous && plan.equivalent(previous, value) ? current(key) : inspect(value, key)]
-          }),
-        )
+        if (new Set(keys).size !== keys.length) throw new Error("Keyed values must have unique keys")
+        const existing = new Map<Key, A>()
+        values.slots().forEach((slot) => {
+          const value = slot()
+          existing.set(plan.keyOf(value), value)
+        })
+        // Stage user-code projections for new and changed values only;
+        // retained equivalent values keep their index state and reads.
+        const staged: Array<{ readonly key: Key; readonly commits: readonly Commit[] }> = []
+        next.forEach((value, index) => {
+          const key = keys[index]
+          if (!existing.has(key)) {
+            staged.push({ key, commits: entries.map((entry) => entry.stage(key, value, "add")) })
+            return
+          }
+          const mask = plan.diff(existing.get(key)!, value)
+          if (mask === 0) return
+          const commits = stageRefresh(key, value, mask)
+          if (commits) staged.push({ key, commits })
+        })
+        const retained = new Set(keys)
         return Transaction.run(() => {
           const changed = values.set(next)
-          if (!changed) return false
-          entries.forEach(clear)
-          values.slots().forEach((slot) => {
-            const key = plan.keyOf(slot())
-            const inspection = prepared.get(key)!
-            entries.forEach((entry, index) => add(entry, key, slot, inspection[index]))
+          existing.forEach((_value, key) => {
+            if (!retained.has(key)) entries.forEach((entry) => entry.remove(key))
           })
-          entries.forEach((entry) => entry.type === "first" && findFirst(entry))
-          return true
+          staged.forEach((item) => {
+            const slot = values.get(item.key)!
+            item.commits.forEach((commit) => commit(slot))
+          })
+          entries.forEach((entry) => entry.afterRebuild())
+          return changed
         })
       },
       update(value) {
         const key = plan.keyOf(value)
         const slot = values.get(key)
-        if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
-        const inspection = inspect(value, key)
-        return Transaction.run(() => {
-          const changed = values.update(value)
-          if (changed) entries.forEach((entry, index) => replace(entry, key, slot, inspection[index]))
-          return changed
-        })
+        if (!slot) return false
+        const mask = plan.diff(slot(), value)
+        const staged = mask === 0 ? undefined : stageRefresh(key, value, mask)
+        return publishStaged(value, mask, staged, slot)
       },
       modify(key, f, changes) {
         const slot = values.get(key)
-        if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
-        let inspection: readonly Inspection[] | undefined
-        return Transaction.run(() => {
-          const changed = values.modify(key, (previous) => {
-            const value = f(previous)
-            if (values.get(plan.keyOf(value)) !== slot) throw new Error("Keyed modify must preserve the value key")
-            inspection = inspect(value, key, changes?.members)
-            return value
-          })
-          if (changed) entries.forEach((entry, index) => replace(entry, key, slot, inspection![index]))
-          return changed
-        })
+        if (!slot) return false
+        const value = f(slot())
+        // Publication below targets the slot for the value's own key, so the
+        // modify key-preservation invariant must be enforced here.
+        if (values.get(plan.keyOf(value)) !== slot) throw new Error("Keyed modify must preserve the value key")
+        const mask = plan.diff(slot(), value)
+        const staged = mask === 0 ? undefined : stageRefresh(key, value, mask, changes?.members)
+        return publishStaged(value, mask, staged, slot)
       },
       insert(value, position) {
         const key = plan.keyOf(value)
-        if (values.has(key)) return values.insert(value, position)
+        if (values.has(key)) throw new Error(`Keyed value already exists: ${String(key)}`)
         requirePosition(position)
-        const inspection = inspect(value, key)
+        const staged = entries.map((entry) => entry.stage(key, value, "add"))
         return Transaction.run(() => {
           const slot = values.insert(value, position)
-          entries.forEach((entry, index) => add(entry, key, slot, inspection[index]))
-          entries.forEach((entry) => entry.type === "first" && updateFirstAfterPlacement(entry, slot))
+          staged.forEach((commit) => commit(slot))
+          entries.forEach((entry) => entry.afterPlacement(slot))
           return slot
         })
       },
@@ -360,143 +613,28 @@ export namespace Layout {
         if (!slot) return false
         return Transaction.run(() => {
           const removed = values.remove(key)
-          entries.forEach((entry) => remove(entry, key))
-          entries.forEach((entry) => entry.type === "first" && entry.slot === slot && findFirst(entry))
+          entries.forEach((entry) => entry.remove(key, slot))
           return removed
         })
       },
       move(key, position) {
         const slot = values.get(key)
-        if (!slot) throw new Error(`Keyed value does not exist: ${String(key)}`)
+        if (!slot) return false
         return Transaction.run(() => {
           const moved = values.move(key, position)
-          if (moved) entries.forEach((entry) => entry.type === "first" && updateFirstAfterPlacement(entry, slot))
+          if (moved) entries.forEach((entry) => entry.afterPlacement(slot))
           return moved
         })
       },
       hasMember(name, member) {
-        const entry = byName.get(normalizeName(name))
-        return entry?.type === "members" && entry.counts.has(member)
+        return byName.get(normalizeName(name))?.member?.(member) ?? false
       },
       first(name) {
-        const entry = byName.get(normalizeName(name))
-        return entry?.type === "first" ? entry.slot : undefined
+        return byName.get(normalizeName(name))?.firstSlot?.()
       },
     }
     collection.set(initial)
     return collection
-
-    function inspect(value: A, key: Key, changes?: Readonly<Record<PropertyKey, unknown>>): readonly Inspection[] {
-      return entries.map((entry) =>
-        entry.type === "members"
-          ? (() => {
-              const change = changes?.[entry.name] as
-                | { readonly add?: readonly unknown[]; readonly remove?: readonly unknown[] }
-                | undefined
-              if (change)
-                return {
-                  type: "members-change" as const,
-                  add: change.add ?? emptyMembers,
-                  remove: change.remove ?? emptyMembers,
-                }
-              const source = entry.extract(value)
-              const previous = entry.byKey.get(key)
-              return {
-                type: "members" as const,
-                value: { source, members: source === previous?.source ? previous.members : new Set(source) },
-              }
-            })()
-          : { type: "first", value: entry.matches(value) },
-      )
-    }
-
-    function current(key: Key): readonly Inspection[] {
-      return entries.map((entry) => {
-        if (entry.type === "members") return { type: "members", value: entry.byKey.get(key)! }
-        return { type: "first", value: entry.matching.has(key) }
-      })
-    }
-
-    function clear(entry: Entry) {
-      if (entry.type === "members") entry.byKey.clear()
-      if (entry.type === "first") entry.matching.clear()
-      if (entry.type === "members") entry.counts.clear()
-      if (entry.type === "first") entry.slot = undefined
-    }
-
-    function add(entry: Entry, key: Key, slot: Readable<A>, inspection: Inspection) {
-      if (entry.type === "members" && inspection.type === "members") {
-        entry.byKey.set(key, inspection.value)
-        inspection.value.members.forEach((member) => entry.counts.set(member, (entry.counts.get(member) ?? 0) + 1))
-        return
-      }
-      if (entry.type === "first" && inspection.type === "first" && inspection.value) entry.matching.add(key)
-    }
-
-    function remove(entry: Entry, key: Key) {
-      if (entry.type === "first") {
-        entry.matching.delete(key)
-        return
-      }
-      entry.byKey.get(key)?.members.forEach((member) => adjust(entry.counts, member, -1))
-      entry.byKey.delete(key)
-    }
-
-    function replace(entry: Entry, key: Key, slot: Readable<A>, inspection: Inspection) {
-      if (entry.type === "members" && inspection.type === "members-change") {
-        const current = entry.byKey.get(key)!
-        const members = current.members
-        inspection.remove.forEach((member) => {
-          if (!members.delete(member)) return
-          adjust(entry.counts, member, -1)
-        })
-        inspection.add.forEach((member) => {
-          if (members.has(member)) return
-          members.add(member)
-          adjust(entry.counts, member, 1)
-        })
-        entry.byKey.set(key, { source: members, members })
-        return
-      }
-      if (entry.type === "members" && inspection.type === "members") {
-        const previous = entry.byKey.get(key)!.members
-        if (previous === inspection.value.members) {
-          entry.byKey.set(key, inspection.value)
-          return
-        }
-        inspection.value.members.forEach((member) => !previous.has(member) && adjust(entry.counts, member, 1))
-        previous.forEach((member) => !inspection.value.members.has(member) && adjust(entry.counts, member, -1))
-        entry.byKey.set(key, inspection.value)
-        return
-      }
-      if (entry.type !== "first" || inspection.type !== "first") return
-      const previous = entry.matching.has(key)
-      if (inspection.value) entry.matching.add(key)
-      if (!inspection.value) entry.matching.delete(key)
-      if (entry.slot === slot && !inspection.value) findFirst(entry)
-      if (entry.slot !== slot && !previous && inspection.value) updateFirstAfterPlacement(entry, slot)
-    }
-
-    function adjust(counts: Map<unknown, number>, member: unknown, amount: 1 | -1) {
-      const count = (counts.get(member) ?? 0) + amount
-      if (count === 0) counts.delete(member)
-      if (count > 0) counts.set(member, count)
-    }
-
-    function updateFirstAfterPlacement(entry: FirstEntry, slot: Readable<A>) {
-      if (!entry.matching.has(plan.keyOf(slot()))) return
-      if (!entry.slot) {
-        entry.slot = slot
-        return
-      }
-      if (entry.slot === slot) return findFirst(entry)
-      const slots = values.slots()
-      if (slots.indexOf(slot) < slots.indexOf(entry.slot)) entry.slot = slot
-    }
-
-    function findFirst(entry: FirstEntry) {
-      entry.slot = values.slots().find((slot) => entry.matching.has(plan.keyOf(slot())))
-    }
 
     function requirePosition(position?: Keyed.Position<Key>) {
       if (!position || position === "end") return
@@ -507,10 +645,6 @@ export namespace Layout {
     function normalizeName(name: PropertyKey) {
       return typeof name === "number" ? String(name) : name
     }
-  }
-
-  function make<A>(equivalent: (left: A, right: A) => boolean): Field<A> {
-    return { equivalent }
   }
 
   function primitive<A>(): Field<A> {
@@ -538,21 +672,154 @@ export namespace Layout {
     )
   }
 
-  function generateEquivalent<A>(
-    fields: ReadonlyArray<{ readonly name: PropertyKey; readonly field: Field<unknown> }>,
-  ) {
-    if (fields.some((field) => typeof field.name === "symbol")) return compileEquivalent<A>(fields)
-    const custom: Array<Field<unknown>["equivalent"]> = []
-    const comparisons = fields.map((field) => {
-      const name = JSON.stringify(String(field.name))
-      if (field.field.primitive) return `Object.is(left[${name}], right[${name}])`
-      const index = custom.push(field.field.equivalent) - 1
-      return `custom[${index}](left[${name}], right[${name}])`
+  // Field diff: a bitmask of changed top-level fields, 0 meaning equivalent.
+  // Bits are assigned per mutable field name; names beyond 31 share the top
+  // bit conservatively. The diff is consistent with `equivalent` by
+  // construction: both compare the same fields with the same field comparators.
+  type DiffField = { readonly name: PropertyKey; readonly field: Field<unknown>; readonly bit: number }
+
+  function compileDiff<A>(fields: ReadonlyArray<DiffField>) {
+    return (left: A, right: A) => {
+      const a = left as Record<PropertyKey, unknown>
+      const b = right as Record<PropertyKey, unknown>
+      let changed = 0
+      for (const field of fields) if (!field.field.equivalent(a[field.name], b[field.name])) changed |= field.bit
+      return changed
+    }
+  }
+
+  function generateDiff<A>(fields: ReadonlyArray<DiffField>) {
+    if (fields.some((field) => typeof field.name === "symbol")) return compileDiff<A>(fields)
+    const emitter: Emitter = { custom: [], declarations: [], names: new Map() }
+    const statements = fields.map((field) => {
+      const property = JSON.stringify(String(field.name))
+      return `if (!(${expression(emitter, field.field, `left[${property}]`, `right[${property}]`)})) changed |= ${field.bit}`
     })
-    const factory = Function("custom", `return (left, right) => ${comparisons.join(" && ") || "true"}`) as (
-      custom: ReadonlyArray<Field<unknown>["equivalent"]>,
-    ) => (left: A, right: A) => boolean
-    return factory(custom)
+    const factory = Function(
+      "custom",
+      `${emitter.declarations.join("\n")}\nreturn (left, right) => { let changed = 0\n${statements.join("\n")}\nreturn changed }`,
+    ) as (custom: ReadonlyArray<Field<unknown>["equivalent"]>) => (left: A, right: A) => number
+    return factory(emitter.custom)
+  }
+
+  type UnionDiffModel = {
+    readonly bits: ReadonlyMap<PropertyKey, number>
+    readonly perVariant: ReadonlyMap<string, ReadonlyArray<DiffField> | undefined>
+  }
+
+  function unionDiffModel(
+    keyName: PropertyKey,
+    tag: PropertyKey,
+    variants: Readonly<Record<string, Field<unknown>>>,
+  ): UnionDiffModel {
+    const bits = new Map<PropertyKey, number>()
+    bits.set(tag, 0)
+    bits.set(keyName, 0)
+    const assigned = new Map<PropertyKey, number>()
+    const perVariant = new Map<string, ReadonlyArray<DiffField> | undefined>()
+    let count = 0
+    for (const variantName of Object.keys(variants)) {
+      const variant = variants[variantName] as Field<unknown> & { readonly type?: string; readonly fields?: Fields }
+      if (variant.type !== "struct") {
+        perVariant.set(variantName, undefined)
+        continue
+      }
+      const fields: DiffField[] = []
+      for (const name of Reflect.ownKeys(variant.fields!)) {
+        const field = variant.fields![name]
+        if (field.immutable) {
+          if (!assigned.has(name) && !bits.has(name)) bits.set(name, 0)
+          continue
+        }
+        const bit = assigned.get(name) ?? 1 << Math.min(count++, 30)
+        assigned.set(name, bit)
+        bits.set(name, bit)
+        fields.push({ name, field, bit })
+      }
+      perVariant.set(variantName, fields)
+    }
+    return { bits, perVariant }
+  }
+
+  function compileUnionDiff(
+    tag: PropertyKey,
+    variants: Readonly<Record<string, Field<unknown>>>,
+    model: UnionDiffModel,
+  ) {
+    return (left: unknown, right: unknown) => {
+      const a = left as Record<PropertyKey, unknown>
+      const b = right as Record<PropertyKey, unknown>
+      const name = a[tag]
+      if (name !== b[tag] || typeof name !== "string") return -1
+      const fields = model.perVariant.get(name)
+      if (!fields) {
+        const variant = variants[name]
+        return variant && variant.equivalent(left, right) ? 0 : -1
+      }
+      let changed = 0
+      for (const field of fields) if (!field.field.equivalent(a[field.name], b[field.name])) changed |= field.bit
+      return changed
+    }
+  }
+
+  function generateUnionDiff(
+    tag: PropertyKey,
+    variants: Readonly<Record<string, Field<unknown>>>,
+    model: UnionDiffModel,
+  ) {
+    const symbols = [...model.perVariant.values()].some((fields) =>
+      fields?.some((field) => typeof field.name === "symbol"),
+    )
+    if (typeof tag === "symbol" || symbols) return compileUnionDiff(tag, variants, model)
+    const emitter: Emitter = { custom: [], declarations: [], names: new Map() }
+    const property = JSON.stringify(String(tag))
+    const cases = Object.keys(variants).map((name) => {
+      const label = JSON.stringify(name)
+      const fields = model.perVariant.get(name)
+      if (!fields) {
+        const index = emitter.custom.push(variants[name].equivalent) - 1
+        return `case ${label}: return custom[${index}](left, right) ? 0 : -1`
+      }
+      const statements = fields.map((field) => {
+        const fieldProperty = JSON.stringify(String(field.name))
+        return `if (!(${expression(emitter, field.field, `left[${fieldProperty}]`, `right[${fieldProperty}]`)})) changed |= ${field.bit}`
+      })
+      return `case ${label}: { let changed = 0\n${statements.join("\n")}\nreturn changed }`
+    })
+    const factory = Function(
+      "custom",
+      `${emitter.declarations.join("\n")}\nreturn (left, right) => { if (left[${property}] !== right[${property}]) return -1; switch (left[${property}]) { ${cases.join("\n")}\ndefault: return -1 } }`,
+    ) as (custom: ReadonlyArray<Field<unknown>["equivalent"]>) => (left: unknown, right: unknown) => number
+    return factory(emitter.custom)
+  }
+
+  // Whole-tree generation: one Function() per plan whose source inlines struct
+  // comparisons, emits real loops for arrays, and hoists unions into named
+  // inner functions the engine can inline. User-supplied equivalence functions
+  // remain indirect calls through the `custom` array; everything structural
+  // compiles to direct code with no interior closure boundaries.
+  type Emitter = {
+    readonly custom: Array<Field<unknown>["equivalent"]>
+    readonly declarations: string[]
+    readonly names: Map<unknown, string>
+  }
+
+  function generateEquivalent<A>(
+    fields: ReadonlyArray<{
+      readonly name: PropertyKey
+      readonly field: Field<unknown>
+    }>,
+  ) {
+    // Symbol names cannot appear in generated source; degrade to the closure backend.
+    if (fields.some((field) => typeof field.name === "symbol")) return compileEquivalent<A>(fields)
+    const emitter: Emitter = { custom: [], declarations: [], names: new Map() }
+    const comparisons = fields
+      .map((field) => {
+        const property = JSON.stringify(String(field.name))
+        return expression(emitter, field.field, `left[${property}]`, `right[${property}]`)
+      })
+      .filter((comparison) => comparison !== "true")
+    return assemble<A>(emitter, comparisons.join(" && ") || "true")
   }
 
   function generateUnion<Tag extends PropertyKey, Variants extends Readonly<Record<string, Field<unknown>>>>(
@@ -560,101 +827,106 @@ export namespace Layout {
     variants: Variants,
   ) {
     if (typeof tag === "symbol") return compileUnion(tag, variants)
-    const names = Object.keys(variants)
-    const custom = names.map((name) => generateField(variants[name]))
-    const cases = names
-      .map((name, index) => `case ${JSON.stringify(name)}: return custom[${index}](left, right)`)
-      .join(";")
-    const property = JSON.stringify(String(tag))
-    const factory = Function(
-      "custom",
-      `return (left, right) => { if (left[${property}] !== right[${property}]) return false; switch (left[${property}]) { ${cases}; default: return false } }`,
-    ) as (custom: ReadonlyArray<Field<unknown>["equivalent"]>) => (left: unknown, right: unknown) => boolean
-    return factory(custom)
+    const emitter: Emitter = { custom: [], declarations: [], names: new Map() }
+    const root = declareUnion(emitter, { tag, variants }, tag, variants)
+    return assemble<Variant<Tag, Variants>>(emitter, `${root}(left, right)`)
   }
 
-  function generateField(field: Field<unknown>): Field<unknown>["equivalent"] {
-    if (field.immutable) return () => true
+  function assemble<A>(emitter: Emitter, body: string) {
+    const factory = Function("custom", `${emitter.declarations.join("\n")}\nreturn (left, right) => ${body}`) as (
+      custom: ReadonlyArray<Field<unknown>["equivalent"]>,
+    ) => (left: A, right: A) => boolean
+    return factory(emitter.custom)
+  }
+
+  function expression(emitter: Emitter, field: Field<unknown>, left: string, right: string): string {
+    if (field.immutable) return "true"
+    if (field.primitive) return `Object.is(${left}, ${right})`
     const layout = field as Field<unknown> & {
-      readonly type?: "struct" | "union" | "keyed-union"
+      readonly type?: "struct" | "union" | "keyed-union" | "array"
       readonly fields?: Fields
+      readonly item?: Field<unknown>
       readonly tag?: PropertyKey
       readonly variants?: Readonly<Record<string, Field<unknown>>>
       readonly key?: NamedKey<PropertyKey, unknown>
     }
-    if (layout.type === "struct") {
-      const fields = Reflect.ownKeys(layout.fields!)
+    if (layout.type === "struct" && Reflect.ownKeys(layout.fields!).every((name) => typeof name !== "symbol")) {
+      const comparisons = Reflect.ownKeys(layout.fields!)
         .filter((name) => !layout.fields![name].immutable)
-        .map((name) => ({ name, field: layout.fields![name] }))
-      return generateEquivalent(generated(fields))
+        .map((name) => {
+          const property = JSON.stringify(String(name))
+          return expression(emitter, layout.fields![name], `${left}[${property}]`, `${right}[${property}]`)
+        })
+        .filter((comparison) => comparison !== "true")
+      if (comparisons.length === 0) return "true"
+      // Shared-reference fast path: immutable updates reuse untouched sub-objects.
+      return `(${left} === ${right} || (${comparisons.join(" && ")}))`
     }
-    if (layout.type === "union") return generateUnion(layout.tag!, layout.variants!)
-    if (layout.type !== "keyed-union") return field.equivalent
-    const equivalent = generateUnion(layout.tag!, layout.variants!) as (left: unknown, right: unknown) => boolean
-    return (left, right) => {
+    if (layout.type === "array") {
+      const name = declare(emitter, layout, (fn) => {
+        const item = expression(emitter, layout.item!, "l[i]", "r[i]")
+        return `function ${fn}(l, r) { if (l === r) return true; if (l.length !== r.length) return false; for (let i = 0; i < l.length; i++) if (!(${item})) return false; return true }`
+      })
+      return `${name}(${left}, ${right})`
+    }
+    if (layout.type === "union" && typeof layout.tag !== "symbol") {
+      return `${declareUnion(emitter, layout, layout.tag!, layout.variants!)}(${left}, ${right})`
+    }
+    if (layout.type === "keyed-union" && typeof layout.tag !== "symbol" && typeof layout.key!.name !== "symbol") {
+      const name = declare(emitter, layout, (fn) => {
+        const property = JSON.stringify(String(layout.key!.name))
+        const key = expression(emitter, layout.key!.field, `l[${property}]`, `r[${property}]`)
+        const union = declareUnion(emitter, layout.variants, layout.tag!, layout.variants!)
+        return `function ${fn}(l, r) { return ${key === "true" ? "" : `${key} && `}${union}(l, r) }`
+      })
+      return `${name}(${left}, ${right})`
+    }
+    const index = emitter.custom.push(field.equivalent) - 1
+    return `custom[${index}](${left}, ${right})`
+  }
+
+  function declareUnion(
+    emitter: Emitter,
+    identity: unknown,
+    tag: PropertyKey,
+    variants: Readonly<Record<string, Field<unknown>>>,
+  ) {
+    return declare(emitter, identity, (fn) => {
+      const property = JSON.stringify(String(tag))
+      const cases = Object.keys(variants)
+        .map((name) => `case ${JSON.stringify(name)}: return ${expression(emitter, variants[name], "l", "r")}`)
+        .join("; ")
+      return `function ${fn}(l, r) { if (l[${property}] !== r[${property}]) return false; switch (l[${property}]) { ${cases}; default: return false } }`
+    })
+  }
+
+  function declare(emitter: Emitter, identity: unknown, build: (name: string) => string) {
+    const existing = emitter.names.get(identity)
+    if (existing) return existing
+    const name = `q${emitter.names.size}`
+    emitter.names.set(identity, name)
+    // Reserve declaration order before build runs: build may recurse into
+    // declare for nested layouts, and the reserved slot keeps this function
+    // textually before its dependents without infinite recursion.
+    const index = emitter.declarations.push("") - 1
+    emitter.declarations[index] = build(name)
+    return name
+  }
+
+  // Compatibility comparator for the closure backend: a simple monomorphic
+  // loop. The generated backend is the performance path.
+  function compileEquivalent<A>(
+    fields: ReadonlyArray<{
+      readonly name: PropertyKey
+      readonly field: Field<unknown>
+    }>,
+  ) {
+    if (fields.length === 0) return (_left: A, _right: A) => true
+    return (left: A, right: A) => {
       const a = left as Record<PropertyKey, unknown>
       const b = right as Record<PropertyKey, unknown>
-      return layout.key!.field.equivalent(a[layout.key!.name], b[layout.key!.name]) && equivalent(left, right)
-    }
-  }
-
-  function generated(fields: ReadonlyArray<{ readonly name: PropertyKey; readonly field: Field<unknown> }>) {
-    return fields.map((field) => ({ ...field, field: { ...field.field, equivalent: generateField(field.field) } }))
-  }
-
-  function compileEquivalent<A>(fields: ReadonlyArray<{ readonly name: PropertyKey; readonly field: Field<unknown> }>) {
-    const value = (input: A) => input as Record<PropertyKey, unknown>
-    if (fields.length === 0) return (_left: A, _right: A) => true
-    if (fields.length === 1) {
-      const first = fields[0]
-      return (left: A, right: A) => first.field.equivalent(value(left)[first.name], value(right)[first.name])
-    }
-    if (fields.length === 2) {
-      const first = fields[0]
-      const second = fields[1]
-      return (left: A, right: A) => {
-        const a = value(left)
-        const b = value(right)
-        return (
-          first.field.equivalent(a[first.name], b[first.name]) &&
-          second.field.equivalent(a[second.name], b[second.name])
-        )
-      }
-    }
-    if (fields.length === 3) {
-      const first = fields[0]
-      const second = fields[1]
-      const third = fields[2]
-      return (left: A, right: A) => {
-        const a = value(left)
-        const b = value(right)
-        return (
-          first.field.equivalent(a[first.name], b[first.name]) &&
-          second.field.equivalent(a[second.name], b[second.name]) &&
-          third.field.equivalent(a[third.name], b[third.name])
-        )
-      }
-    }
-    if (fields.length === 4) {
-      const first = fields[0]
-      const second = fields[1]
-      const third = fields[2]
-      const fourth = fields[3]
-      return (left: A, right: A) => {
-        const a = value(left)
-        const b = value(right)
-        return (
-          first.field.equivalent(a[first.name], b[first.name]) &&
-          second.field.equivalent(a[second.name], b[second.name]) &&
-          third.field.equivalent(a[third.name], b[third.name]) &&
-          fourth.field.equivalent(a[fourth.name], b[fourth.name])
-        )
-      }
-    }
-    return (left: A, right: A) => {
-      const a = value(left)
-      const b = value(right)
-      return fields.every((field) => field.field.equivalent(a[field.name], b[field.name]))
+      for (const field of fields) if (!field.field.equivalent(a[field.name], b[field.name])) return false
+      return true
     }
   }
 }
