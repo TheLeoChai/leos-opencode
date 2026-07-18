@@ -2723,16 +2723,40 @@ test("settles pending tools when a live failure arrives", async () => {
   }
 })
 
-test("renders admitted prompts immediately and tracks them until promoted", async () => {
+test("preserves admitted prompts when hydration races with promotion", async () => {
   const events = createEventStream()
   const sessionID = "session-1"
   const messageID = "msg_user_1"
+  const queuedID = "msg_user_2"
+  const requested = Promise.withResolvers<void>()
+  const response = Promise.withResolvers<Response>()
   const calls = createFetch((url) => {
-    if (url.pathname === `/api/session/${sessionID}/message`)
+    if (url.pathname === `/api/session/${sessionID}/pending`)
       return json({
-        data: [{ id: messageID, type: "user", text: "hello", time: { created: 0 } }],
-        cursor: {},
+        data: [
+          {
+            admittedSeq: 0,
+            id: messageID,
+            sessionID,
+            timeCreated: 0,
+            type: "user",
+            data: { text: "hello" },
+            delivery: "steer",
+          },
+          {
+            admittedSeq: 1,
+            id: queuedID,
+            sessionID,
+            timeCreated: 1,
+            type: "user",
+            data: { text: "queued" },
+            delivery: "queue",
+          },
+        ],
       })
+    if (url.pathname !== `/api/session/${sessionID}/message`) return
+    requested.resolve()
+    return response.promise
   }, events)
   let sync!: ReturnType<typeof useData>
   let ready!: () => void
@@ -2790,12 +2814,11 @@ test("renders admitted prompts immediately and tracks them until promoted", asyn
     ])
     expect(sync.session.input.list(sessionID)).toEqual([messageID])
 
-    await sync.session.message.sync(sessionID)
-    expect(sync.session.message.list(sessionID)?.[0]?.metadata).toBeUndefined()
-
+    const refresh = sync.session.message.sync(sessionID)
+    await requested.promise
     emitEvent(events, {
       id: "evt_prompted_1",
-      created: 0,
+      created: 1,
       type: "session.input.promoted",
       durable: durable(sessionID, 1),
       data: {
@@ -2807,18 +2830,111 @@ test("renders admitted prompts immediately and tracks them until promoted", asyn
     await wait(() => received.at(-1) === "session.input.promoted")
     expect(received.slice(-2)).toEqual(["session.input.admitted", "session.input.promoted"])
     unsubscribe()
-    const message = sync.session.message.list(sessionID)?.[0]
+    response.resolve(json({ data: [], cursor: {} }))
+    await refresh
+
+    const message = sync.session.message.get(sessionID, messageID)
     expect(message?.type).toBe("user")
     if (message?.type !== "user") return
     expect(message).toMatchObject({ id: messageID, text: "hello" })
     expect(message.metadata).toBeUndefined()
-    expect(sync.session.pending.list(sessionID)).toEqual([])
-    expect(sync.session.input.list(sessionID)).toEqual([])
-    expect(sync.session.message.list(sessionID).map((message) => message.id)).toEqual([messageID])
+    expect(sync.session.input.list(sessionID)).toEqual([queuedID])
+    expect(sync.session.message.list(sessionID).map((message) => message.id)).toEqual([messageID, queuedID])
+    expect(sync.session.message.get(sessionID, queuedID)).toMatchObject({ id: queuedID, text: "queued" })
     expect(sync.session.message.list("missing")).toEqual([])
     expect(sync.session.message.get(sessionID, messageID)).toBe(message)
     expect(sync.session.message.get(sessionID, "missing")).toBeUndefined()
     expect(received).toHaveLength(3)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("reconciles admissions and promotions that arrive while pending work hydrates", async () => {
+  const events = createEventStream()
+  const sessionID = "session-pending-race"
+  const messageID = "msg_late_user"
+  const promotedID = "msg_promoted_user"
+  const requested = Promise.withResolvers<void>()
+  const response = Promise.withResolvers<Response>()
+  const calls = createFetch((url) => {
+    if (url.pathname !== `/api/session/${sessionID}/pending`) return
+    requested.resolve()
+    return response.promise
+  }, events)
+  let data!: ReturnType<typeof useData>
+
+  function Probe() {
+    data = useData()
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <ClientProvider api={createApi(calls.fetch)}>
+        <ProjectProvider>
+          <DataProvider>
+            <Probe />
+          </DataProvider>
+        </ProjectProvider>
+      </ClientProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    const sync = data.session.pending.sync(sessionID)
+    await requested.promise
+    emitEvent(events, {
+      id: "evt_late_admitted",
+      created: 1,
+      type: "session.input.admitted",
+      durable: durable(sessionID),
+      data: {
+        sessionID,
+        inputID: messageID,
+        input: { type: "user", data: { text: "late" }, delivery: "steer" },
+      },
+    })
+    emitEvent(events, {
+      id: "evt_promoted_admitted",
+      created: 2,
+      type: "session.input.admitted",
+      durable: durable(sessionID, 1),
+      data: {
+        sessionID,
+        inputID: promotedID,
+        input: { type: "user", data: { text: "promoted" }, delivery: "steer" },
+      },
+    })
+    emitEvent(events, {
+      id: "evt_promoted",
+      created: 3,
+      type: "session.input.promoted",
+      durable: durable(sessionID, 2),
+      data: { sessionID, inputID: promotedID },
+    })
+    await wait(() => data.session.pending.list(sessionID).length === 1)
+    response.resolve(
+      json({
+        data: [
+          {
+            admittedSeq: 1,
+            id: promotedID,
+            sessionID,
+            timeCreated: 2,
+            type: "user",
+            data: { text: "promoted" },
+            delivery: "steer",
+          },
+        ],
+      }),
+    )
+    await sync
+
+    expect(data.session.pending.list(sessionID).map((item) => item.id)).toEqual([messageID])
+    expect(data.session.input.list(sessionID)).toEqual([messageID])
+    expect(data.session.message.get(sessionID, messageID)).toMatchObject({ text: "late" })
+    expect(data.session.message.get(sessionID, promotedID)).toMatchObject({ text: "promoted" })
   } finally {
     app.renderer.destroy()
   }
