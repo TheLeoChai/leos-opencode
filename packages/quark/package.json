@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "effect-quark",
+  "name": "@opencode-ai/quark",
   "version": "0.0.0",
   "private": true,
   "type": "module",

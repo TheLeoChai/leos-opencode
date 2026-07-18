@@ -1,5 +1,5 @@
 import type { SessionMessageAssistant, SessionMessageInfo } from "@opencode-ai/client"
-import { Keyed, Layout, Transaction } from "effect-quark"
+import { Keyed, Layout, Transaction } from "@opencode-ai/quark"
 import { SessionContent } from "./content"
 
 const PartRefLayout = Layout.struct({

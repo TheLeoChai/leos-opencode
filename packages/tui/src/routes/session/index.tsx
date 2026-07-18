@@ -13,7 +13,7 @@ import {
   Switch,
   useContext,
 } from "solid-js"
-import { KeyedFor, useSlot, useValue } from "effect-quark/solid"
+import { KeyedFor, useSlot, useValue } from "@opencode-ai/quark/solid"
 import { SessionContent } from "./content"
 import path from "node:path"
 import { EOL, tmpdir } from "node:os"

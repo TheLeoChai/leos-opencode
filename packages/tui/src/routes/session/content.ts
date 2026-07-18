@@ -1,5 +1,5 @@
 import type { SessionMessageAssistant } from "@opencode-ai/client"
-import { Keyed, Layout } from "effect-quark"
+import { Keyed, Layout } from "@opencode-ai/quark"
 
 /**
  * Stable per-part reactive slots for assistant message content.

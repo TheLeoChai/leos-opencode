@@ -1,4 +1,4 @@
-import { Keyed } from "effect-quark"
+import { Keyed } from "@opencode-ai/quark"
 import { createStore, produce } from "solid-js/store"
 import { SessionTimeline, type PartRef } from "../src/routes/session/timeline"
 import { createHarness, type Workload } from "../../quark/bench/harness"

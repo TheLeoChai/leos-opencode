@@ -87,7 +87,7 @@
     "clipboardy": "4.0.0",
     "diff": "catalog:",
     "effect": "catalog:",
-    "effect-quark": "workspace:*",
+    "@opencode-ai/quark": "workspace:*",
     "fuzzysort": "catalog:",
     "get-east-asian-width": "catalog:",
     "open": "10.1.2",

@@ -74,13 +74,17 @@ export namespace Layout {
     make(initial?: readonly A[], options?: { readonly metrics?: Keyed.Metrics }): Keyed.Keyed<A, Key>
   }
 
+  type IndexField<A> = A extends unknown ? keyof A : never
+
   export interface MembersIndex<A, Member> {
     readonly type: "members"
+    readonly fields?: readonly IndexField<A>[]
     readonly extract: (value: A) => Iterable<Member>
   }
 
   export interface FirstIndex<A> {
     readonly type: "first"
+    readonly fields?: readonly IndexField<A>[]
     readonly matches: (value: A) => boolean
   }
 
@@ -114,7 +118,7 @@ export namespace Layout {
 
   /**
    * Comparator backend. "generated" (the default) compiles one specialized
-   * Function per plan; "closure" is the compatibility fallback for
+   * Function per plan operation; "closure" is the compatibility fallback for
    * environments that forbid runtime code generation (CSP).
    */
   export interface CompileOptions {
@@ -123,7 +127,9 @@ export namespace Layout {
 
   export interface IndexBuilder<A> {
     members<Member>(extract: (value: A) => Iterable<Member>): MembersIndex<A, Member>
+    members<Member>(fields: readonly IndexField<A>[], extract: (value: A) => Iterable<Member>): MembersIndex<A, Member>
     first(matches: (value: A) => boolean): FirstIndex<A>
+    first(fields: readonly IndexField<A>[], matches: (value: A) => boolean): FirstIndex<A>
   }
 
   export interface Collection<A, Key, Definitions extends Indexes<A>> extends Keyed.Keyed<A, Key> {
@@ -270,8 +276,14 @@ export namespace Layout {
   export function collection(input: unknown, define: unknown, options?: CompileOptions): unknown {
     const plan = compile(input as never, options) as Plan<unknown, unknown>
     const definitions = (define as (index: IndexBuilder<unknown>) => Indexes<unknown>)({
-      members: (extract) => ({ type: "members", extract }),
-      first: (matches) => ({ type: "first", matches }),
+      members: ((fieldsOrExtract: readonly PropertyKey[] | ((value: unknown) => Iterable<unknown>), extract?: (value: unknown) => Iterable<unknown>) =>
+        typeof fieldsOrExtract === "function"
+          ? { type: "members", extract: fieldsOrExtract }
+          : { type: "members", fields: fieldsOrExtract, extract: extract! }) as IndexBuilder<unknown>["members"],
+      first: ((fieldsOrMatches: readonly PropertyKey[] | ((value: unknown) => boolean), matches?: (value: unknown) => boolean) =>
+        typeof fieldsOrMatches === "function"
+          ? { type: "first", matches: fieldsOrMatches }
+          : { type: "first", fields: fieldsOrMatches, matches: matches! }) as IndexBuilder<unknown>["first"],
     })
     return {
       ...plan,
@@ -314,52 +326,22 @@ export namespace Layout {
   ): Collection<A, Key, Definitions> {
     // `pending` hands a diff the collection already computed for a staged
     // mutation to the comparator, so equivalence costs one comparison, not two.
-    let pending: number | ReadonlyMap<Key, number> | undefined
+    let pending: { readonly previous: A; readonly next: A; readonly mask: number } | undefined
     const values = Keyed.make<A, Key>({
       key: plan.keyOf,
       equivalent(left, right) {
-        const mask = typeof pending === "number" ? pending : pending?.get(plan.keyOf(left))
-        return (mask ?? plan.diff(left, right)) === 0
+        if (pending && pending.previous === left && pending.next === right) {
+          const mask = pending.mask
+          pending = undefined
+          return mask === 0
+        }
+        return plan.diff(left, right) === 0
       },
       metrics: options?.metrics,
     })
 
-    // Projection dependency tracker: extract/matches run against a proxy that
-    // records which top-level fields they read, as a bitmask aligned with
-    // plan.diff. Enumerating keys or reading an unknown property is
-    // conservative (all bits). Soundness: a pure projection re-reads a field
-    // only if the fields it previously read are unchanged or it is re-run.
-    let trackTarget: Record<PropertyKey, unknown> | undefined
-    let trackMask = 0
-    const trackProxy = new Proxy({} as Record<PropertyKey, unknown>, {
-      get(_, property) {
-        trackMask |= plan.bits.get(property) ?? -1
-        return trackTarget![property]
-      },
-      has(_, property) {
-        trackMask |= plan.bits.get(property) ?? -1
-        return property in trackTarget!
-      },
-      ownKeys() {
-        trackMask = -1
-        return Reflect.ownKeys(trackTarget!)
-      },
-      getOwnPropertyDescriptor(_, property) {
-        trackMask = -1
-        const descriptor = Reflect.getOwnPropertyDescriptor(trackTarget!, property)
-        return descriptor && { ...descriptor, configurable: true }
-      },
-    })
-    function tracked<T>(value: A, f: (value: A) => T) {
-      trackTarget = value as Record<PropertyKey, unknown>
-      trackMask = 0
-      try {
-        const result = f(trackProxy as A)
-        return { result, reads: trackMask }
-      } finally {
-        trackTarget = undefined
-        trackMask = 0
-      }
+    function dependencyMask(fields: readonly PropertyKey[] | undefined) {
+      return fields?.reduce<number>((mask, field) => mask | (plan.bits.get(normalizeName(field)) ?? -1), 0) ?? -1
     }
 
     // Each index entry stages user-code projections before any state mutation
@@ -369,20 +351,23 @@ export namespace Layout {
     type MemberChange = { readonly add?: readonly unknown[]; readonly remove?: readonly unknown[] }
     interface Entry {
       readonly name: PropertyKey
-      reads(key: Key): number | undefined
+      readonly reads: number
       stage(key: Key, value: A, mode: "add" | "replace"): Commit
       applyDelta?(key: Key, change: MemberChange): void
       remove(key: Key, slot?: Readable<A>): void
-      afterPlacement(slot: Readable<A>): void
-      afterRebuild(): void
+      afterPlacement?(slot: Readable<A>): void
+      afterRebuild?(): void
       member?(candidate: unknown): boolean
       firstSlot?(): Readable<A> | undefined
     }
 
-    function membersEntry(name: PropertyKey, extract: (value: A) => Iterable<unknown>): Entry {
+    function membersEntry(
+      name: PropertyKey,
+      fields: readonly PropertyKey[] | undefined,
+      extract: (value: A) => Iterable<unknown>,
+    ): Entry {
       const counts = new Map<unknown, number>()
       const byKey = new Map<Key, { readonly source: Iterable<unknown>; readonly members: Set<unknown> }>()
-      const readsByKey = new Map<Key, number>()
 
       function adjust(member: unknown, amount: 1 | -1) {
         const count = (counts.get(member) ?? 0) + amount
@@ -395,24 +380,18 @@ export namespace Layout {
 
       return {
         name,
-        reads: (key) => readsByKey.get(key),
+        reads: dependencyMask(fields),
         stage(key, value) {
           const previous = byKey.get(key)
-          const trackedMembers = tracked(value, (candidate) => {
-            const source = extract(candidate)
-            return {
-              source,
-              members: source === previous?.source ? previous.members : new Set(source),
-            }
-          })
+          const source = extract(value)
+          const members = source === previous?.source ? previous.members : new Set(source)
           return () => {
-            readsByKey.set(key, trackedMembers.reads)
-            if (!previous) trackedMembers.result.members.forEach((member) => adjust(member, 1))
-            if (previous && previous.members !== trackedMembers.result.members) {
-              trackedMembers.result.members.forEach((member) => !previous.members.has(member) && adjust(member, 1))
-              previous.members.forEach((member) => !trackedMembers.result.members.has(member) && adjust(member, -1))
+            if (!previous) members.forEach((member) => adjust(member, 1))
+            if (previous && previous.members !== members) {
+              members.forEach((member) => !previous.members.has(member) && adjust(member, 1))
+              previous.members.forEach((member) => !members.has(member) && adjust(member, -1))
             }
-            byKey.set(key, trackedMembers.result)
+            byKey.set(key, { source, members })
           }
         },
         applyDelta(key, change) {
@@ -425,25 +404,23 @@ export namespace Layout {
             members.add(member)
             adjust(member, 1)
           })
-          // The set was mutated in place: poison the source-identity check and
-          // drop observed reads so the next non-delta projection recomputes.
+          // The set was mutated in place, so poison the source-identity check.
           byKey.set(key, { source: members, members })
-          readsByKey.delete(key)
         },
         remove(key) {
           byKey.get(key)?.members.forEach((member) => adjust(member, -1))
           byKey.delete(key)
-          readsByKey.delete(key)
         },
-        afterPlacement() {},
-        afterRebuild() {},
         member: (candidate) => counts.has(candidate),
       }
     }
 
-    function firstEntry(name: PropertyKey, matches: (value: A) => boolean): Entry {
+    function firstEntry(
+      name: PropertyKey,
+      fields: readonly PropertyKey[] | undefined,
+      matches: (value: A) => boolean,
+    ): Entry {
       const matching = new Set<Key>()
-      const readsByKey = new Map<Key, number>()
       let slot: Readable<A> | undefined
 
       function findFirst() {
@@ -472,25 +449,23 @@ export namespace Layout {
 
       return {
         name,
-        reads: (key) => readsByKey.get(key),
+        reads: dependencyMask(fields),
         stage(key, value, mode) {
-          const matched = tracked(value, matches)
+          const matched = matches(value)
           return (valueSlot) => {
-            readsByKey.set(key, matched.reads)
             const previous = matching.has(key)
-            if (matched.result) matching.add(key)
-            if (!matched.result) matching.delete(key)
+            if (matched) matching.add(key)
+            if (!matched) matching.delete(key)
             if (mode === "add") return
-            if (slot === valueSlot && !matched.result) {
+            if (slot === valueSlot && !matched) {
               findFirst()
               return
             }
-            if (slot !== valueSlot && !previous && matched.result) afterPlacement(valueSlot)
+            if (slot !== valueSlot && !previous && matched) afterPlacement(valueSlot)
           }
         },
         remove(key, removedSlot) {
           matching.delete(key)
-          readsByKey.delete(key)
           if (removedSlot && slot === removedSlot) findFirst()
         },
         afterPlacement,
@@ -501,13 +476,13 @@ export namespace Layout {
 
     const entries: Entry[] = Reflect.ownKeys(definitions).map((name) => {
       const definition = definitions[name]
-      if (definition.type === "members") return membersEntry(name, definition.extract)
-      return firstEntry(name, definition.matches)
+      if (definition.type === "members") return membersEntry(name, definition.fields, definition.extract)
+      return firstEntry(name, definition.fields, definition.matches)
     })
     const byName = new Map(entries.map((entry) => [entry.name, entry]))
 
     // Stage refresh work for one changed value: explicit member deltas win,
-    // then projections whose observed reads are disjoint from the change are
+    // then projections whose declared fields are disjoint from the change are
     // skipped entirely. Returns undefined when no index work is required.
     function stageRefresh(key: Key, value: A, mask: number, changes?: unknown) {
       const record = changes as Readonly<Record<PropertyKey, MemberChange | undefined>> | undefined
@@ -519,14 +494,19 @@ export namespace Layout {
           ;(staged ??= []).push(() => delta(key, change))
           continue
         }
-        const reads = entry.reads(key)
-        if (reads !== undefined && (mask & reads) === 0) continue
+        if ((mask & entry.reads) === 0) continue
         ;(staged ??= []).push(entry.stage(key, value, "replace"))
       }
       return staged
     }
 
-    function publishStaged(value: A, mask: number, staged: readonly Commit[] | undefined, slot: Readable<A>) {
+    function publishStaged(
+      previous: A,
+      value: A,
+      mask: number,
+      staged: readonly Commit[] | undefined,
+      slot: Readable<A>,
+    ) {
       // Indexes are plain data, not reactive state; the transaction exists so
       // subscribers cannot observe published values with stale indexes. With
       // no staged commits there is nothing to observe out of order.
@@ -538,16 +518,12 @@ export namespace Layout {
       })
 
       function publishValue() {
-        return withPending(mask, () => values.update(value))
-      }
-    }
-
-    function withPending<T>(mask: number | ReadonlyMap<Key, number>, f: () => T) {
-      pending = mask
-      try {
-        return f()
-      } finally {
-        pending = undefined
+        pending = { previous, next: value, mask }
+        try {
+          return values.update(value)
+        } finally {
+          pending = undefined
+        }
       }
     }
 
@@ -555,13 +531,13 @@ export namespace Layout {
       ...values,
       set(next) {
         const keys = next.map(plan.keyOf)
-        if (new Set(keys).size !== keys.length) throw new Error("Keyed values must have unique keys")
+        const retained = new Set(keys)
+        if (retained.size !== keys.length) throw new Error("Keyed values must have unique keys")
         const existing = new Map<Key, A>()
         values.slots().forEach((slot) => {
           const value = slot()
           existing.set(plan.keyOf(value), value)
         })
-        const masks = new Map<Key, number>()
         // Stage user-code projections for new and changed values only;
         // retained equivalent values keep their index state and reads.
         const staged: Array<{ readonly key: Key; readonly commits: readonly Commit[] }> = []
@@ -571,44 +547,52 @@ export namespace Layout {
             staged.push({ key, commits: entries.map((entry) => entry.stage(key, value, "add")) })
             return
           }
-          const mask = plan.diff(existing.get(key)!, value)
-          masks.set(key, mask)
+          const previous = existing.get(key)!
+          if (previous === value) return
+          const mask = plan.diff(previous, value)
           if (mask === 0) return
           const commits = stageRefresh(key, value, mask)
           if (commits) staged.push({ key, commits })
         })
-        const retained = new Set(keys)
+        const structure = values.slots()
         return Transaction.run(() => {
-          const changed = withPending(masks, () => values.set(next))
-          existing.forEach((_value, key) => {
-            if (!retained.has(key)) entries.forEach((entry) => entry.remove(key))
-          })
+          const changed = values.set(next)
+          if (!changed) return false
+          const structural = structure !== values.slots()
+          if (structural)
+            existing.forEach((_value, key) => {
+              if (!retained.has(key)) entries.forEach((entry) => entry.remove(key))
+            })
           staged.forEach((item) => {
             const slot = values.get(item.key)!
             item.commits.forEach((commit) => commit(slot))
           })
-          entries.forEach((entry) => entry.afterRebuild())
-          return changed
+          if (structural) entries.forEach((entry) => entry.afterRebuild?.())
+          return true
         })
       },
       update(value) {
         const key = plan.keyOf(value)
         const slot = values.get(key)
         if (!slot) return false
-        const mask = plan.diff(slot(), value)
+        const previous = slot()
+        if (previous === value) return false
+        const mask = plan.diff(previous, value)
         const staged = mask === 0 ? undefined : stageRefresh(key, value, mask)
-        return publishStaged(value, mask, staged, slot)
+        return publishStaged(previous, value, mask, staged, slot)
       },
       modify(key, f, changes) {
         const slot = values.get(key)
         if (!slot) return false
-        const value = f(slot())
+        const previous = slot()
+        const value = f(previous)
         // Publication below targets the slot for the value's own key, so the
         // modify key-preservation invariant must be enforced here.
         if (values.get(plan.keyOf(value)) !== slot) throw new Error("Keyed modify must preserve the value key")
-        const mask = plan.diff(slot(), value)
+        if (previous === value) return false
+        const mask = plan.diff(previous, value)
         const staged = mask === 0 ? undefined : stageRefresh(key, value, mask, changes?.members)
-        return publishStaged(value, mask, staged, slot)
+        return publishStaged(previous, value, mask, staged, slot)
       },
       insert(value, position) {
         const key = plan.keyOf(value)
@@ -618,7 +602,7 @@ export namespace Layout {
         return Transaction.run(() => {
           const slot = values.insert(value, position)
           staged.forEach((commit) => commit(slot))
-          entries.forEach((entry) => entry.afterPlacement(slot))
+          entries.forEach((entry) => entry.afterPlacement?.(slot))
           return slot
         })
       },
@@ -636,7 +620,7 @@ export namespace Layout {
         if (!slot) return false
         return Transaction.run(() => {
           const moved = values.move(key, position)
-          if (moved) entries.forEach((entry) => entry.afterPlacement(slot))
+          if (moved) entries.forEach((entry) => entry.afterPlacement?.(slot))
           return moved
         })
       },
@@ -712,7 +696,7 @@ export namespace Layout {
     const factory = Function(
       "custom",
       `${emitter.declarations.join("\n")}\nreturn (left, right) => { let changed = 0\n${statements.join("\n")}\nreturn changed }`,
-    ) as (custom: ReadonlyArray<Field<unknown>["equivalent"]>) => (left: A, right: A) => number
+    ) as (custom: ReadonlyArray<Field<unknown>>) => (left: A, right: A) => number
     return factory(emitter.custom)
   }
 
@@ -792,8 +776,8 @@ export namespace Layout {
       const fields = model.perVariant.get(name)
       if (!fields) {
         const variant = variants[name]
-        const index = emitter.custom.push((left, right) => variant.equivalent(left, right)) - 1
-        return `case ${label}: return custom[${index}](left, right) ? 0 : -1`
+        const index = emitter.custom.push(variant) - 1
+        return `case ${label}: return custom[${index}].equivalent(left, right) ? 0 : -1`
       }
       const statements = fields.map((field) => {
         const fieldProperty = JSON.stringify(String(field.name))
@@ -804,17 +788,17 @@ export namespace Layout {
     const factory = Function(
       "custom",
       `${emitter.declarations.join("\n")}\nreturn (left, right) => { if (left[${property}] !== right[${property}]) return -1; switch (left[${property}]) { ${cases.join("\n")}\ndefault: return -1 } }`,
-    ) as (custom: ReadonlyArray<Field<unknown>["equivalent"]>) => (left: unknown, right: unknown) => number
+    ) as (custom: ReadonlyArray<Field<unknown>>) => (left: unknown, right: unknown) => number
     return factory(emitter.custom)
   }
 
-  // Whole-tree generation: one Function() per plan whose source inlines struct
-  // comparisons, emits real loops for arrays, and hoists unions into named
-  // inner functions the engine can inline. User-supplied equivalence functions
-  // remain indirect calls through the `custom` array; everything structural
-  // compiles to direct code with no interior closure boundaries.
+  // Whole-tree generation: one Function() per plan operation whose source
+  // inlines struct comparisons, emits real loops for arrays, and hoists unions
+  // into named inner functions the engine can inline. User-supplied equivalence
+  // functions remain indirect calls through the `custom` array; everything
+  // structural compiles to direct code with no interior closure boundaries.
   type Emitter = {
-    readonly custom: Array<Field<unknown>["equivalent"]>
+    readonly custom: Field<unknown>[]
     readonly declarations: string[]
     readonly names: Map<unknown, string>
   }
@@ -849,7 +833,7 @@ export namespace Layout {
 
   function assemble<A>(emitter: Emitter, body: string) {
     const factory = Function("custom", `${emitter.declarations.join("\n")}\nreturn (left, right) => ${body}`) as (
-      custom: ReadonlyArray<Field<unknown>["equivalent"]>,
+      custom: ReadonlyArray<Field<unknown>>,
     ) => (left: A, right: A) => boolean
     return factory(emitter.custom)
   }
@@ -896,8 +880,8 @@ export namespace Layout {
       })
       return `${name}(${left}, ${right})`
     }
-    const index = emitter.custom.push((left, right) => field.equivalent(left, right)) - 1
-    return `custom[${index}](${left}, ${right})`
+    const index = emitter.custom.push(field) - 1
+    return `custom[${index}].equivalent(${left}, ${right})`
   }
 
   function declareUnion(

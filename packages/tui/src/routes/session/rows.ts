@@ -1,5 +1,5 @@
-import { Keyed } from "effect-quark"
-import { useValue } from "effect-quark/solid"
+import { Keyed } from "@opencode-ai/quark"
+import { useValue } from "@opencode-ai/quark/solid"
 import { batch, createEffect, on, onCleanup, type Accessor } from "solid-js"
 import { useData } from "../../context/data"
 import { useClient } from "../../context/client"

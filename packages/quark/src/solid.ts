@@ -7,9 +7,9 @@ export function useValue<A>(readable: Readable<A>): Accessor<A> {
 }
 
 /**
- * Reactive accessor for one keyed slot. Tracks structure only until the slot
- * exists; afterwards value changes flow through the slot alone, so unrelated
- * structural churn cannot re-render the consumer.
+ * Reactive accessor for one keyed slot. Structural changes re-resolve the
+ * slot, while memo equality prevents an unchanged slot from propagating to the
+ * consumer. Value changes flow through the slot itself.
  */
 export function useSlot<A, Key>(keyed: Keyed.Keyed<A, Key>, key: () => Key): Accessor<A | undefined> {
   const structure = useValue(keyed.slots)
