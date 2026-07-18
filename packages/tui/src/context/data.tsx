@@ -955,7 +955,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
                 await client.api.message.list({ sessionID, limit: 200, order: "desc" })
               ).data.toReversed()
               messageIndex.set(sessionID, new Map(messages.map((message, index) => [message.id, index])))
-              content.drop(sessionID)
+              content.prune(sessionID, new Set(messages.map((message) => message.id)))
               for (const item of messages) {
                 if (item.type === "assistant") content.seed(sessionID, item.id, item.content)
               }

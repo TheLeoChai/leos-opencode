@@ -973,6 +973,102 @@ test("publishes streaming deltas to one part slot without touching siblings", as
   }
 })
 
+test("keeps part slot references alive across message sync", async () => {
+  const events = createEventStream()
+  const sessionID = "session-slot-identity"
+  // The refetch snapshot is identical to the streamed state, so any failure
+  // here is collection identity loss, not snapshot staleness.
+  let snapshot: unknown[] = []
+  const calls = createFetch((url) => {
+    if (url.pathname === `/api/session/${sessionID}/message`) return json({ data: snapshot, cursor: {} })
+  }, events)
+  let data!: ReturnType<typeof useData>
+  let client!: ReturnType<typeof useClient>
+
+  function Probe() {
+    data = useData()
+    client = useClient()
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <ClientProvider api={createApi(calls.fetch)}>
+        <ProjectProvider>
+          <DataProvider>
+            <Probe />
+          </DataProvider>
+        </ProjectProvider>
+      </ClientProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    await wait(() => client.connection.status() === "connected")
+    emitEvent(events, {
+      id: "evt_identity_step",
+      created: 1,
+      type: "session.step.started",
+      durable: durable(sessionID),
+      data: {
+        sessionID,
+        assistantMessageID: "message-assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+      },
+    })
+    emitEvent(events, {
+      id: "evt_identity_text",
+      created: 2,
+      type: "session.text.started",
+      durable: durable(sessionID, 1),
+      data: { sessionID, assistantMessageID: "message-assistant", ordinal: 0 },
+    })
+    emitEvent(events, {
+      id: "evt_identity_ended",
+      created: 3,
+      type: "session.text.ended",
+      durable: durable(sessionID, 2),
+      data: { sessionID, assistantMessageID: "message-assistant", ordinal: 0, text: "hello world" },
+    })
+    // A mounted view captures the collection once, at useSlot setup.
+    const mounted = data.session.message.parts(sessionID, "message-assistant")
+    await wait(() => {
+      const part = mounted.get("text:0")?.()
+      return part?.type === "text" && part.text === "hello world"
+    })
+
+    snapshot = [
+      {
+        id: "message-assistant",
+        type: "assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+        content: [{ type: "text", text: "hello world" }],
+        time: { created: 1 },
+      },
+    ]
+    await data.session.message.sync(sessionID)
+
+    // The registry must hand back the same collection the view is holding.
+    expect(data.session.message.parts(sessionID, "message-assistant")).toBe(mounted)
+
+    emitEvent(events, {
+      id: "evt_identity_delta",
+      created: 4,
+      type: "session.text.delta",
+      data: { sessionID, assistantMessageID: "message-assistant", ordinal: 0, delta: "!!" },
+    })
+    // The delta must reach the reference a mounted view is subscribed to.
+    await wait(() => {
+      const part = mounted.get("text:0")?.()
+      return part?.type === "text" && part.text === "hello world!!"
+    })
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("does not publish timeline rows for duplicate streaming deltas", async () => {
   const events = createEventStream()
   const sessionID = "session-stream-metrics"

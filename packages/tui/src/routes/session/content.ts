@@ -86,6 +86,18 @@ export namespace SessionContent {
           if (key.startsWith(prefix)) collections.delete(key)
         }
       },
+      /**
+       * Drop collections for messages absent from a refetched snapshot.
+       * Present messages must be reseeded in place, never dropped: mounted
+       * views hold their collection reference for their whole lifetime, so
+       * replacing the object would orphan their subscriptions.
+       */
+      prune(sessionID: string, keep: ReadonlySet<string>) {
+        const prefix = `${sessionID}\u0000`
+        for (const key of [...collections.keys()]) {
+          if (key.startsWith(prefix) && !keep.has(key.slice(prefix.length))) collections.delete(key)
+        }
+      },
     }
   }
 }
