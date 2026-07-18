@@ -34,7 +34,7 @@ import { SessionContent } from "../routes/session/content"
 
 export type DataSessionStatus = "idle" | "running"
 
-const messageIDFromEvent = (eventID: string) => eventID.replace(/^evt_/, "msg_")
+export const messageIDFromEvent = (eventID: string) => eventID.replace(/^evt_/, "msg_")
 
 // Global MCP elicitations temporarily use "global" instead of a real session ID, so the
 // server cannot recover their Location when settling them. Preserve the event Location
@@ -150,6 +150,44 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
     // Assistant content lives in per-message keyed part slots, not the Solid
     // store: streaming deltas publish one slot instead of reconciling arrays.
     const content = SessionContent.make()
+    // Variant-scoped slot operations: each owns its part address scheme and
+    // type guard so the streaming handlers below read as pure transforms.
+    // A missing collection or key is a normal straggler race and no-ops.
+    const modifyText = (
+      data: { sessionID: string; assistantMessageID: string; ordinal: number },
+      f: (part: Extract<SessionContent.Part, { type: "text" }>) => SessionContent.Part,
+    ) =>
+      content
+        .get(data.sessionID, data.assistantMessageID)
+        ?.modify(SessionContent.textID(data.ordinal), (part) => (part.type === "text" ? f(part) : part))
+    const modifyReasoning = (
+      data: { sessionID: string; assistantMessageID: string; ordinal: number },
+      f: (part: Extract<SessionContent.Part, { type: "reasoning" }>) => SessionContent.Part,
+    ) =>
+      content
+        .get(data.sessionID, data.assistantMessageID)
+        ?.modify(SessionContent.reasoningID(data.ordinal), (part) => (part.type === "reasoning" ? f(part) : part))
+    const modifyTool = (
+      data: { sessionID: string; assistantMessageID: string; callID: string },
+      f: (part: Extract<SessionContent.Part, { type: "tool" }>) => SessionContent.Part,
+    ) =>
+      content
+        .get(data.sessionID, data.assistantMessageID)
+        ?.modify(data.callID, (part) => (part.type === "tool" ? f(part) : part))
+    const insertPart = (data: { sessionID: string; assistantMessageID: string }, part: SessionContent.Part) => {
+      const parts = content.ensure(data.sessionID, data.assistantMessageID)
+      if (!parts.has(part.partID)) parts.insert(part)
+    }
+    // Shared settlement trailer for tool success and failure.
+    const settled = (
+      part: Extract<SessionContent.Part, { type: "tool" }>,
+      data: { executed: boolean; resultState?: Extract<SessionContent.Part, { type: "tool" }>["providerResultState"] },
+      completed: number,
+    ) => ({
+      executed: data.executed || part.executed === true,
+      providerResultState: data.resultState,
+      time: { ...part.time, completed },
+    })
     const sync = createSync()
     const pendingOperations = new Map<string, PendingOperation[]>()
 
@@ -251,6 +289,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             ...item.data,
             time: { created: item.timeCreated },
           }
+        // Placeholder row until the server projects the real compaction;
+        // pending compactions carry no reason, so "manual" is a stand-in.
         return {
           id: item.id,
           type: "compaction",
@@ -566,142 +606,110 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             }
           })
           break
-        case "session.text.started": {
-          const parts = content.ensure(event.data.sessionID, event.data.assistantMessageID)
-          const partID = SessionContent.textID(event.data.ordinal)
-          if (!parts.has(partID)) parts.insert({ type: "text", text: "", partID })
+        case "session.text.started":
+          insertPart(event.data, { type: "text", text: "", partID: SessionContent.textID(event.data.ordinal) })
           break
-        }
         case "session.text.delta":
-          content
-            .get(event.data.sessionID, event.data.assistantMessageID)
-            ?.modify(SessionContent.textID(event.data.ordinal), (part) =>
-              part.type === "text" ? { ...part, text: part.text + event.data.delta } : part,
-            )
+          modifyText(event.data, (part) => ({ ...part, text: part.text + event.data.delta }))
           break
         case "session.text.ended":
-          content
-            .get(event.data.sessionID, event.data.assistantMessageID)
-            ?.modify(SessionContent.textID(event.data.ordinal), (part) =>
-              part.type === "text" ? { ...part, text: event.data.text } : part,
-            )
+          modifyText(event.data, (part) => ({ ...part, text: event.data.text }))
           break
-        case "session.tool.input.started": {
-          const parts = content.ensure(event.data.sessionID, event.data.assistantMessageID)
-          if (!parts.has(event.data.callID))
-            parts.insert({
-              type: "tool",
-              id: event.data.callID,
-              name: event.data.name,
-              time: { created: event.created },
-              state: { status: "streaming", input: "" },
-              partID: event.data.callID,
-            })
-          break
-        }
-        case "session.tool.input.delta":
-          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
-            if (part.type !== "tool" || part.state.status !== "streaming") return part
-            return { ...part, state: { ...part.state, input: part.state.input + event.data.delta } }
+        case "session.tool.input.started":
+          insertPart(event.data, {
+            type: "tool",
+            id: event.data.callID,
+            name: event.data.name,
+            time: { created: event.created },
+            state: { status: "streaming", input: "" },
+            partID: event.data.callID,
           })
+          break
+        case "session.tool.input.delta":
+          modifyTool(event.data, (part) =>
+            part.state.status !== "streaming"
+              ? part
+              : { ...part, state: { ...part.state, input: part.state.input + event.data.delta } },
+          )
           break
         case "session.tool.input.ended":
-          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
-            if (part.type !== "tool" || part.state.status !== "streaming") return part
-            return { ...part, state: { ...part.state, input: event.data.text } }
-          })
+          modifyTool(event.data, (part) =>
+            part.state.status !== "streaming" ? part : { ...part, state: { ...part.state, input: event.data.text } },
+          )
           break
         case "session.tool.called":
-          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
-            if (part.type !== "tool") return part
-            return {
-              ...part,
-              time: { ...part.time, ran: event.created },
-              executed: event.data.executed,
-              providerState: event.data.state,
-              state: { status: "running", input: event.data.input, structured: {}, content: [] },
-            }
-          })
+          modifyTool(event.data, (part) => ({
+            ...part,
+            time: { ...part.time, ran: event.created },
+            executed: event.data.executed,
+            providerState: event.data.state,
+            state: { status: "running", input: event.data.input, structured: {}, content: [] },
+          }))
           break
         case "session.tool.progress":
-          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
-            if (part.type !== "tool" || part.state.status !== "running") return part
-            return {
-              ...part,
-              state: { ...part.state, structured: event.data.structured, content: [...event.data.content] },
-            }
-          })
+          modifyTool(event.data, (part) =>
+            part.state.status !== "running"
+              ? part
+              : {
+                  ...part,
+                  state: { ...part.state, structured: event.data.structured, content: [...event.data.content] },
+                },
+          )
           break
         case "session.tool.success":
-          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
-            if (part.type !== "tool" || part.state.status !== "running") return part
-            return {
-              ...part,
-              state: {
-                status: "completed",
-                input: part.state.input,
-                structured: event.data.structured,
-                content: [...event.data.content],
-                result: event.data.result,
-              },
-              executed: event.data.executed || part.executed === true,
-              providerResultState: event.data.resultState,
-              time: { ...part.time, completed: event.created },
-            }
-          })
+          modifyTool(event.data, (part) =>
+            part.state.status !== "running"
+              ? part
+              : {
+                  ...part,
+                  state: {
+                    status: "completed",
+                    input: part.state.input,
+                    structured: event.data.structured,
+                    content: [...event.data.content],
+                    result: event.data.result,
+                  },
+                  ...settled(part, event.data, event.created),
+                },
+          )
           break
         case "session.tool.failed":
-          content.get(event.data.sessionID, event.data.assistantMessageID)?.modify(event.data.callID, (part) => {
-            if (part.type !== "tool" || (part.state.status !== "streaming" && part.state.status !== "running"))
-              return part
-            return {
-              ...part,
-              state: {
-                status: "error",
-                error: event.data.error,
-                input: typeof part.state.input === "string" ? {} : part.state.input,
-                structured: part.state.status === "running" ? part.state.structured : {},
-                content: part.state.status === "running" ? part.state.content : [],
-                result: event.data.result,
-              },
-              executed: event.data.executed || part.executed === true,
-              providerResultState: event.data.resultState,
-              time: { ...part.time, completed: event.created },
-            }
+          modifyTool(event.data, (part) =>
+            part.state.status !== "streaming" && part.state.status !== "running"
+              ? part
+              : {
+                  ...part,
+                  state: {
+                    status: "error",
+                    error: event.data.error,
+                    input: typeof part.state.input === "string" ? {} : part.state.input,
+                    structured: part.state.status === "running" ? part.state.structured : {},
+                    content: part.state.status === "running" ? part.state.content : [],
+                    result: event.data.result,
+                  },
+                  ...settled(part, event.data, event.created),
+                },
+          )
+          break
+        case "session.reasoning.started":
+          insertPart(event.data, {
+            type: "reasoning",
+            text: "",
+            state: event.data.state,
+            time: { created: event.created },
+            partID: SessionContent.reasoningID(event.data.ordinal),
           })
           break
-        case "session.reasoning.started": {
-          const parts = content.ensure(event.data.sessionID, event.data.assistantMessageID)
-          const partID = SessionContent.reasoningID(event.data.ordinal)
-          if (!parts.has(partID))
-            parts.insert({
-              type: "reasoning",
-              text: "",
-              state: event.data.state,
-              time: { created: event.created },
-              partID,
-            })
-          break
-        }
         case "session.reasoning.delta":
-          content
-            .get(event.data.sessionID, event.data.assistantMessageID)
-            ?.modify(SessionContent.reasoningID(event.data.ordinal), (part) =>
-              part.type === "reasoning" ? { ...part, text: part.text + event.data.delta } : part,
-            )
+          modifyReasoning(event.data, (part) => ({ ...part, text: part.text + event.data.delta }))
           break
         case "session.reasoning.ended":
-          content
-            .get(event.data.sessionID, event.data.assistantMessageID)
-            ?.modify(SessionContent.reasoningID(event.data.ordinal), (part) => {
-              if (part.type !== "reasoning") return part
-              return {
-                ...part,
-                text: event.data.text,
-                time: { created: part.time?.created ?? event.created, completed: event.created },
-                state: event.data.state !== undefined ? event.data.state : part.state,
-              }
-            })
+          modifyReasoning(event.data, (part) => ({
+            ...part,
+            text: event.data.text,
+            time: { created: part.time?.created ?? event.created, completed: event.created },
+            state: event.data.state !== undefined ? event.data.state : part.state,
+          }))
           break
         case "session.retry.scheduled":
           message.update(event.data.sessionID, (draft, index) => {
@@ -981,12 +989,17 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           sync(sessionID: string) {
             return sync.run(`session.message:${sessionID}`, async () => {
               await syncPending(sessionID)
-              const localInputs = pendingInputs(sessionID).map((item) => item.id)
-              const pendingMessages = [...(store.session.pending[sessionID] ?? [])].map(message.fromPending)
+              const inputIDs = () => pendingInputs(sessionID).map((item) => item.id)
+              // Snapshot pending state before the fetch: inputs admitted before
+              // the fetch must survive even if the server promotes them while
+              // the list request is in flight. The post-fetch snapshot covers
+              // inputs admitted during the fetch.
+              const localInputs = inputIDs()
+              const pendingMessages = (store.session.pending[sessionID] ?? []).map(message.fromPending)
               const projected = await client.api.message.list({ sessionID, limit: 200, order: "desc" })
               const next = projected.data.toReversed()
               const index = new Map(next.map((message, index) => [message.id, index]))
-              const localInputIDs = new Set([...localInputs, ...pendingInputs(sessionID).map((item) => item.id)])
+              const localInputIDs = new Set([...localInputs, ...inputIDs()])
               localInputIDs.forEach((messageID) => {
                 const position = messageIndex.get(sessionID)?.get(messageID)
                 const item = position === undefined ? undefined : store.session.message[sessionID]?.[position]
@@ -1004,6 +1017,10 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             })
           },
           parts(sessionID: string, messageID: string) {
+            // Deliberately ensure-on-read: consumers capture the collection
+            // for their lifetime (see useSlot), so identity per (session,
+            // message) must be stable even when reads precede streaming.
+            // Stray collections are reclaimed by prune on the next sync.
             return content.ensure(sessionID, messageID)
           },
           invalidate(sessionID: string) {

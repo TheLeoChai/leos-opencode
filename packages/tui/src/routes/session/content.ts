@@ -13,6 +13,8 @@ export namespace SessionContent {
   type ContentPart = SessionMessageAssistant["content"][number]
   export type Part = ContentPart & { readonly partID: string }
   export type Parts = Keyed.Keyed<Part, string>
+  /** Read surface for view components; mutation stays with the data layer. */
+  export type PartsView = Pick<Parts, "slots" | "values" | "get" | "has">
 
   // Streamed sub-objects are replaced immutably on change, so reference
   // equality is the correct (and cheapest) field comparator for them.
@@ -52,8 +54,26 @@ export namespace SessionContent {
     const ordinals = { text: 0, reasoning: 0 }
     return content.map((part) => {
       if (part.type === "tool") return { ...part, partID: part.id }
-      return { ...part, partID: `${part.type}:${ordinals[part.type]++}` }
+      const id = part.type === "text" ? textID : reasoningID
+      return { ...part, partID: id(ordinals[part.type]++) }
     })
+  }
+
+  /** Non-empty text parts of one message, in slot order. */
+  export function textParts(parts: PartsView) {
+    return parts
+      .values()
+      .filter((part): part is Extract<Part, { type: "text" }> => part.type === "text" && part.text.trim().length > 0)
+  }
+
+  export function hasText(parts: PartsView) {
+    return textParts(parts).length > 0
+  }
+
+  export function text(parts: PartsView) {
+    return textParts(parts)
+      .map((part) => part.text)
+      .join("\n")
   }
 
   export function make(options?: { readonly metrics?: Keyed.Metrics }) {

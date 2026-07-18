@@ -177,6 +177,8 @@ export namespace SessionTimeline {
       appendFooter,
       removeFooter,
       repartition,
+      /** Cheap no-op check so per-delta callers can skip batching machinery. */
+      hasPart: (ref: PartRef) => state.hasMember("parts", partRowID(ref)),
     }
   }
 }

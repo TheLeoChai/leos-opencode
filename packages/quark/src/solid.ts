@@ -11,7 +11,7 @@ export function useValue<A>(readable: Readable<A>): Accessor<A> {
  * slot, while memo equality prevents an unchanged slot from propagating to the
  * consumer. Value changes flow through the slot itself.
  */
-export function useSlot<A, Key>(keyed: Keyed.Keyed<A, Key>, key: () => Key): Accessor<A | undefined> {
+export function useSlot<A, Key>(keyed: Pick<Keyed.Keyed<A, Key>, "slots" | "get">, key: () => Key): Accessor<A | undefined> {
   const structure = useValue(keyed.slots)
   const slot = createMemo(() => {
     structure()

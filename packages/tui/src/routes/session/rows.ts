@@ -1,8 +1,9 @@
 import { Keyed } from "@opencode-ai/quark"
 import { useValue } from "@opencode-ai/quark/solid"
 import { batch, createEffect, on, onCleanup, type Accessor } from "solid-js"
-import { useData } from "../../context/data"
+import { messageIDFromEvent, useData } from "../../context/data"
 import { useClient } from "../../context/client"
+import { SessionContent } from "./content"
 import {
   SessionTimeline,
   compactionQueuedRow,
@@ -36,7 +37,6 @@ export function createSessionRows(sessionID: Accessor<string>, options?: { reado
       state.replace(value, isPending, pendingPermissions())
     })
   }
-  const mutate = (f: () => void) => batch(f)
 
   function reduce() {
     const messages = data.session.message.list(sessionID())
@@ -69,7 +69,7 @@ export function createSessionRows(sessionID: Accessor<string>, options?: { reado
 
   createEffect(() => {
     const pending = pendingPermissions()
-    mutate(() => state.repartition(pending))
+    batch(() => state.repartition(pending))
   })
 
   createEffect(
@@ -132,20 +132,24 @@ export function createSessionRows(sessionID: Accessor<string>, options?: { reado
   )
 
   const appendMessage = (messageID: string) =>
-    mutate(() => {
+    batch(() => {
       const pending = isPending(messageID)
       const message = data.session.message.get(sessionID(), messageID)
       state.appendMessage(messageID, { pending, compaction: message?.type === "compaction" })
     })
 
-  const appendPart = (ref: PartRef, part: AppendPart) => mutate(() => state.appendPart(ref, part))
+  const appendPart = (ref: PartRef, part: AppendPart) => {
+    // Streaming deltas after the first are no-ops; skip the batch machinery.
+    if (state.hasPart(ref)) return
+    batch(() => state.appendPart(ref, part))
+  }
 
-  const appendFooter = (messageID: string) => mutate(() => state.appendFooter(messageID))
+  const appendFooter = (messageID: string) => batch(() => state.appendFooter(messageID))
 
-  const removeFooter = (messageID: string) => mutate(() => state.removeFooter(messageID))
+  const removeFooter = (messageID: string) => batch(() => state.removeFooter(messageID))
 
   const message = (event: { id: string; data: { sessionID: string } }) => {
-    if (event.data.sessionID === sessionID()) appendMessage(event.id.replace(/^evt_/, "msg_"))
+    if (event.data.sessionID === sessionID()) appendMessage(messageIDFromEvent(event.id))
   }
   const input = (event: {
     data: {
@@ -163,35 +167,41 @@ export function createSessionRows(sessionID: Accessor<string>, options?: { reado
   const subscriptions = [
     data.on("session.input.admitted", input),
     data.on("session.compaction.started", (event) => {
-      if (event.data.sessionID === sessionID()) appendMessage(event.data.inputID ?? event.id.replace(/^evt_/, "msg_"))
+      if (event.data.sessionID === sessionID()) appendMessage(event.data.inputID ?? messageIDFromEvent(event.id))
     }),
     data.on("session.instructions.updated", message),
     data.on("session.synthetic", (event) => {
       if (event.data.sessionID === sessionID() && event.data.description?.trim())
-        appendMessage(event.id.replace(/^evt_/, "msg_"))
+        appendMessage(messageIDFromEvent(event.id))
     }),
     data.on("session.shell.started", message),
     data.on("session.agent.selected", message),
     data.on("session.model.selected", message),
     data.on("session.text.delta", (event) => {
       if (event.data.sessionID === sessionID() && event.data.delta.trim())
-        appendPart({ messageID: event.data.assistantMessageID, partID: `text:${event.data.ordinal}` }, { type: "text" })
+        appendPart(
+          { messageID: event.data.assistantMessageID, partID: SessionContent.textID(event.data.ordinal) },
+          { type: "text" },
+        )
     }),
     data.on("session.text.ended", (event) => {
       if (event.data.sessionID === sessionID() && event.data.text.trim())
-        appendPart({ messageID: event.data.assistantMessageID, partID: `text:${event.data.ordinal}` }, { type: "text" })
+        appendPart(
+          { messageID: event.data.assistantMessageID, partID: SessionContent.textID(event.data.ordinal) },
+          { type: "text" },
+        )
     }),
     data.on("session.reasoning.delta", (event) => {
       if (event.data.sessionID === sessionID() && event.data.delta.trim())
         appendPart(
-          { messageID: event.data.assistantMessageID, partID: `reasoning:${event.data.ordinal}` },
+          { messageID: event.data.assistantMessageID, partID: SessionContent.reasoningID(event.data.ordinal) },
           { type: "reasoning" },
         )
     }),
     data.on("session.reasoning.ended", (event) => {
       if (event.data.sessionID === sessionID() && event.data.text.trim())
         appendPart(
-          { messageID: event.data.assistantMessageID, partID: `reasoning:${event.data.ordinal}` },
+          { messageID: event.data.assistantMessageID, partID: SessionContent.reasoningID(event.data.ordinal) },
           { type: "reasoning" },
         )
     }),

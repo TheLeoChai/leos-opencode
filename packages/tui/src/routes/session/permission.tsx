@@ -15,8 +15,22 @@ import { getScrollAcceleration } from "../../util/scroll"
 import { useConfig } from "../../config"
 import { Keymap } from "../../context/keymap"
 import { usePathFormatter } from "../../context/path-format"
+import { useSlot } from "@opencode-ai/quark/solid"
 
 type PermissionStage = "permission" | "always" | "reject"
+
+/** Resolved tool input for a permission request, once input streaming settles. */
+export function usePermissionInput(request: PermissionV2Request): () => Record<string, unknown> {
+  const data = useData()
+  const tool = request.source
+  if (!tool) return () => ({})
+  const part = useSlot(data.session.message.parts(request.sessionID, tool.messageID), () => tool.callID)
+  return createMemo(() => {
+    const item = part()
+    if (item?.type === "tool" && item.state.status !== "streaming") return item.state.input
+    return {}
+  })
+}
 
 function EditBody(props: { request: PermissionV2Request; patch?: string }) {
   const themeState = useTheme()
@@ -143,13 +157,7 @@ export function PermissionPrompt(props: { request: PermissionV2Request; director
   const pathFormatter = usePathFormatter()
   const session = createMemo(() => data.session.get(props.request.sessionID))
 
-  const input = createMemo(() => {
-    const tool = props.request.source
-    if (!tool) return {}
-    const part = data.session.message.parts(props.request.sessionID, tool.messageID).get(tool.callID)?.()
-    if (part?.type === "tool" && part.state.status !== "streaming") return part.state.input
-    return {}
-  })
+  const input = usePermissionInput(props.request)
 
   const { themeV2 } = useTheme()
 

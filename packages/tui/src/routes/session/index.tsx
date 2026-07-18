@@ -5,6 +5,7 @@ import {
   createMemo,
   createSignal,
   For,
+  mapArray,
   Match,
   on,
   onCleanup,
@@ -189,6 +190,10 @@ export function Session() {
   const client = useClient()
   const editor = useEditorContext()
   const rows = createSessionRows(() => route.sessionID)
+  const partsOf = (messageID: string) => data.session.message.parts(route.sessionID, messageID)
+  // Slot reads here are deliberately untracked: messageBoundaryIDs depends
+  // only on structurally-immutable row fields (id, type, origin), so this memo
+  // re-runs on structural changes (rows.slots) and message list changes only.
   const boundaries = createMemo(() =>
     messageBoundaryIDs(
       rows.slots().map((slot) => slot()),
@@ -294,11 +299,7 @@ export function Session() {
       direction,
       children: scroll.getChildren(),
       messages: messages(),
-      hasText: (messageID) =>
-        data.session.message
-          .parts(route.sessionID, messageID)
-          .values()
-          .some((part) => part.type === "text" && part.text.trim()),
+      hasText: (messageID) => SessionContent.hasText(partsOf(messageID)),
       scrollTop: scroll.scrollTop,
       viewportY: scroll.viewport.y,
       currentID: navigationMessage(),
@@ -668,8 +669,7 @@ export function Session() {
           return
         }
 
-        const textParts = data.session.message
-          .parts(route.sessionID, lastAssistantMessage.id)
+        const textParts = partsOf(lastAssistantMessage.id)
           .values()
           .filter((part) => part.type === "text")
         if (textParts.length === 0) {
@@ -710,7 +710,7 @@ export function Session() {
           const sessionData = session()
           if (!sessionData) return
           const transcript = formatSessionTranscript(sessionData, messages(), showThinking(), (messageID) =>
-            data.session.message.parts(route.sessionID, messageID).values(),
+            partsOf(messageID).values(),
           )
           await clipboard.write?.(transcript)
           toast.show({ message: "Session transcript copied to clipboard!", variant: "success" })
@@ -739,7 +739,7 @@ export function Session() {
           const content =
             options.format === "markdown"
               ? formatSessionTranscript(sessionData, messages(), options.thinking, (messageID) =>
-                  data.session.message.parts(route.sessionID, messageID).values(),
+                  partsOf(messageID).values(),
                 )
               : await (async () => {
                   if (options.debug) {
@@ -928,15 +928,12 @@ export function Session() {
                   <SessionRowView
                     row={row()}
                     message={(messageID) => data.session.message.get(route.sessionID, messageID)}
-                    parts={(messageID) => data.session.message.parts(route.sessionID, messageID)}
+                    parts={partsOf}
                     boundaryID={boundaries()[index()]}
                   />
                 )}
               </KeyedFor>
-              <BackgroundToolHint
-                messages={messages()}
-                parts={(messageID) => data.session.message.parts(route.sessionID, messageID)}
-              />
+              <BackgroundToolHint messages={messages()} parts={partsOf} />
               <Show when={session()?.revert?.messageID}>
                 <RevertMessage
                   count={
@@ -1026,7 +1023,7 @@ export function Session() {
 function SessionRowView(props: {
   row: SessionRow
   message: (messageID: string) => SessionMessageInfo | undefined
-  parts: (messageID: string) => SessionContent.Parts
+  parts: (messageID: string) => SessionContent.PartsView
   boundaryID?: string
 }) {
   return (
@@ -1082,7 +1079,7 @@ function SessionRowView(props: {
 
 function BackgroundToolHint(props: {
   messages: SessionMessageInfo[]
-  parts: (messageID: string) => SessionContent.Parts
+  parts: (messageID: string) => SessionContent.PartsView
 }) {
   const { themeV2 } = useTheme()
   const shortcut = Keymap.useShortcut("session.background")
@@ -1091,17 +1088,23 @@ function BackgroundToolHint(props: {
       (message): message is SessionMessageAssistant => message.type === "assistant" && !message.time.completed,
     ),
   )
-  const parts = createMemo(() => {
+  // Track the part structure (publishes only on part insert/remove) and the
+  // individual tool slots; text and reasoning deltas never reach this memo.
+  const toolSlots = createMemo(() => {
     const message = current()
-    return message ? useValue(props.parts(message.id).values) : undefined
+    if (!message) return []
+    const parts = props.parts(message.id)
+    return useValue(parts.slots)()
+      .filter((slot) => slot().type === "tool")
+      .map((slot) => useValue(slot))
   })
-  const visible = createMemo(
-    () =>
-      parts()?.()?.some((part) => {
-        if (part.type !== "tool" || part.state.status !== "running") return false
-        const display = toolDisplay(part.name)
-        return display === "shell" || display === "subagent"
-      }) ?? false,
+  const visible = createMemo(() =>
+    toolSlots().some((tool) => {
+      const part = tool()
+      if (part.type !== "tool" || part.state.status !== "running") return false
+      const display = toolDisplay(part.name)
+      return display === "shell" || display === "subagent"
+    }),
   )
   return (
     <Show when={visible() && shortcut()}>
@@ -1142,10 +1145,18 @@ function SessionMessageView(props: { message: SessionMessageInfo }) {
   )
 }
 
+// Per-ref slot accessors for group views. mapArray reuses entries by ref
+// identity, so appending one ref to a group creates one new slot subscription
+// instead of rebuilding the whole accessor list; value changes flow through
+// the individual slots.
+function usePartSlots(parts: (messageID: string) => SessionContent.PartsView, refs: () => readonly PartRef[]) {
+  return mapArray(refs, (ref) => ({ ref, part: useSlot(parts(ref.messageID), () => ref.partID) }))
+}
+
 function SessionPartView(props: {
   partRef: PartRef
   message: (messageID: string) => SessionMessageInfo | undefined
-  parts: (messageID: string) => SessionContent.Parts
+  parts: (messageID: string) => SessionContent.PartsView
 }) {
   const message = createMemo(() => props.message(props.partRef.messageID))
   // One reactive slot per part: unrelated deltas in the same message cannot
@@ -1178,21 +1189,14 @@ function SessionReasoningGroupView(props: {
   refs: readonly PartRef[]
   completed: boolean
   message: (messageID: string) => SessionMessageInfo | undefined
-  parts: (messageID: string) => SessionContent.Parts
+  parts: (messageID: string) => SessionContent.PartsView
 }) {
   const ctx = use()
   const { themeV2, syntax } = useTheme()
   const renderer = useRenderer()
   const [expanded, setExpanded] = createSignal(false)
   const [hover, setHover] = createSignal(false)
-  // Slot accessors are created per ref list; value changes flow through the
-  // individual slots without re-running the accessor construction.
-  const accessors = createMemo(() =>
-    props.refs.map((ref) => ({
-      ref,
-      part: useSlot(props.parts(ref.messageID), () => ref.partID),
-    })),
-  )
+  const accessors = usePartSlots(props.parts, () => props.refs)
   const parts = createMemo(() =>
     accessors().flatMap((entry) => {
       const message = props.message(entry.ref.messageID)
@@ -1312,22 +1316,18 @@ function SessionGroupView(props: {
   pending: readonly PartRef[]
   completed: boolean
   message: (messageID: string) => SessionMessageInfo | undefined
-  parts: (messageID: string) => SessionContent.Parts
+  parts: (messageID: string) => SessionContent.PartsView
 }) {
   const { themeV2 } = useTheme()
   const ctx = use()
   const renderer = useRenderer()
   const [expanded, setExpanded] = createSignal(false)
   const [hover, setHover] = createSignal(false)
-  // Slot accessors per ref list: tool state changes flow through individual
-  // slots; the accessor lists rebuild only when the refs themselves change.
-  const slots = (refs: () => readonly PartRef[]) =>
-    createMemo(() => refs().map((ref) => useSlot(props.parts(ref.messageID), () => ref.partID)))
-  const groupedSlots = slots(() => props.refs)
-  const pendingSlots = slots(() => props.pending)
-  const parts = (accessors: readonly (() => SessionContent.Part | undefined)[]) =>
-    accessors.flatMap((accessor) => {
-      const part = accessor()
+  const groupedSlots = usePartSlots(props.parts, () => props.refs)
+  const pendingSlots = usePartSlots(props.parts, () => props.pending)
+  const parts = (entries: readonly { readonly part: () => SessionContent.Part | undefined }[]) =>
+    entries.flatMap((entry) => {
+      const part = entry.part()
       if (part?.type !== "tool") return []
       return [part]
     })

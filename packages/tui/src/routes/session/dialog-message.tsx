@@ -6,6 +6,7 @@ import { useToast } from "../../ui/toast"
 import { useClient } from "../../context/client"
 import { errorMessage } from "../../util/error"
 import { DialogFork } from "./dialog-fork"
+import { SessionContent } from "./content"
 import type { PromptInfo } from "../../prompt/history"
 
 export function DialogMessage(props: {
@@ -62,12 +63,7 @@ export function DialogMessage(props: {
               value.type === "user"
                 ? value.text
                 : value.type === "assistant"
-                  ? data.session.message
-                      .parts(props.sessionID, props.messageID)
-                      .values()
-                      .filter((content) => content.type === "text")
-                      .map((content) => content.text)
-                      .join("\n")
+                  ? SessionContent.text(data.session.message.parts(props.sessionID, props.messageID))
                   : "text" in value
                     ? value.text
                     : ""

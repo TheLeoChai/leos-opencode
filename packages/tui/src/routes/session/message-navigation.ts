@@ -19,7 +19,9 @@ export function findMessageBoundary(input: {
   direction: "next" | "prev"
   children: readonly MessageChild[]
   messages: readonly SessionMessageInfo[]
-  hasText?: (messageID: string) => boolean
+  // Assistant text lives in SessionContent slots; the store `content` field is
+  // fetch-time only, so callers must supply the live text predicate.
+  hasText: (messageID: string) => boolean
   scrollTop: number
   viewportY: number
   currentID?: string
@@ -36,9 +38,7 @@ export function findMessageBoundary(input: {
         return [{ id: child.id, y, top: y }]
       }
       if (input.userOnly || message.type !== "assistant") return []
-      const hasText =
-        input.hasText?.(message.id) ?? message.content.some((content) => content.type === "text" && content.text.trim())
-      if (!hasText) return []
+      if (!input.hasText(message.id)) return []
       const y = input.scrollTop + child.y - input.viewportY
       return [{ id: child.id, y, top: Math.max(0, y - 1) }]
     })
