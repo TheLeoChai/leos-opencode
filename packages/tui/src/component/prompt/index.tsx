@@ -24,6 +24,7 @@ import { useSDK } from "../../context/sdk"
 import { useRoute } from "../../context/route"
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
+import { useData } from "../../context/data"
 import { useEvent } from "../../context/event"
 import { editorSelectionKey, useEditorContext, type EditorSelection } from "../../context/editor"
 import { normalizePromptContent, openEditor } from "../../editor"
@@ -57,11 +58,19 @@ import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { useLocation } from "../../context/location"
+import {
+  createDiveInPromptID,
+  submitDiveInPrompt,
+  toDiveInPendingMessage,
+  toDiveInPrompt,
+} from "../../util/dive-in"
 
 registerOpencodeSpinner()
 
 export type PromptProps = {
   sessionID?: string
+  isDiveInTrack?: boolean
+  canSubmitDiveInTrack?: boolean
   visible?: boolean
   disabled?: boolean
   onSubmit?: () => void
@@ -157,6 +166,7 @@ export function Prompt(props: PromptProps) {
   const route = useRoute()
   const project = useProject()
   const sync = useSync()
+  const data = useData()
   const tuiConfig = useTuiConfig()
   const dialog = useDialog()
   const toast = useToast()
@@ -1115,6 +1125,28 @@ export function Prompt(props: PromptProps) {
         variant,
         parts: nonTextParts.filter((x) => x.type === "file"),
       })
+    } else if (props.isDiveInTrack) {
+      if (!props.canSubmitDiveInTrack) {
+        toast.show({ message: "DiveIn track is not active", variant: "warning" })
+        return
+      }
+      const prompt = toDiveInPrompt({
+        text: inputText,
+        editorText: editorParts.map((part) => (part.type === "text" ? part.text : "")).join(""),
+        parts: nonTextParts,
+      })
+      const messageID = createDiveInPromptID()
+      data.session.message.addPending(sessionID!, toDiveInPendingMessage(messageID, prompt, nonTextParts))
+      move.startSubmit()
+      void submitDiveInPrompt(sdk.client.v2.session, sessionID!, prompt, messageID).catch((error) => {
+        data.session.message.removePending(sessionID!, messageID)
+        toast.show({
+          title: "Failed to send prompt",
+          message: errorMessage(error),
+          variant: "error",
+        })
+      })
+      if (editorParts.length > 0) editor.markSelectionSent()
     } else {
       move.startSubmit()
       sdk.client.session

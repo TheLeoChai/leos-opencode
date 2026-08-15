@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
-import type { Event, GlobalEvent } from "@opencode-ai/sdk/v2"
+import type { Event, GlobalEvent, SessionMessage } from "@opencode-ai/sdk/v2"
 import { onMount } from "solid-js"
 import { ProjectProvider } from "../../../src/context/project"
 import { SDKProvider } from "../../../src/context/sdk"
@@ -429,6 +429,186 @@ test("renders admitted prompts only after they become model-visible", async () =
     expect(message?.type).toBe("user")
     if (message?.type !== "user") return
     expect(message).toMatchObject({ id: "msg_user_1", text: "hello" })
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("reconciles optimistic prompts on prompted and cancelled events", async () => {
+  const events = createEventSource()
+  const calls = createFetch(undefined, events)
+  let data!: ReturnType<typeof useData>
+  let ready!: () => void
+  const mounted = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+
+  function Probe() {
+    data = useData()
+    onMount(ready)
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+        <ProjectProvider>
+          <DataProvider>
+            <Probe />
+          </DataProvider>
+        </ProjectProvider>
+      </SDKProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    await mounted
+    const pending: SessionMessage = {
+      id: "msg_pending",
+      type: "user",
+      text: "follow up",
+      time: { created: 1 },
+    }
+    data.session.message.addPending("session-1", pending)
+    expect(data.session.message.list("session-1")).toEqual([pending])
+
+    emitEvent(events, {
+      id: "evt_prompted_pending",
+      type: "session.next.prompted",
+      properties: {
+        sessionID: "session-1",
+        messageID: "msg_pending",
+        timestamp: 2,
+        prompt: { text: "follow up" },
+        delivery: "steer",
+      },
+    })
+    await wait(() => data.session.message.list("session-1")?.[0]?.id === "msg_pending")
+    expect(data.session.message.list("session-1")).toHaveLength(1)
+
+    const cancelled: SessionMessage = {
+      id: "msg_cancelled",
+      type: "user",
+      text: "cancelled",
+      time: { created: 3 },
+    }
+    data.session.message.addPending("session-2", cancelled)
+    emitEvent(events, {
+      id: "evt_prompt_cancelled",
+      type: "session.next.prompt.cancelled",
+      properties: { sessionID: "session-2", messageID: "msg_cancelled", timestamp: 4 },
+    })
+    await wait(() => (data.session.message.list("session-2") ?? []).length === 0)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("paginates V2 messages and preserves live events during hydration", async () => {
+  const events = createEventSource()
+  const sessionID = "session-cursor"
+  const requests: URL[] = []
+  let releaseFirstPage!: () => void
+  const firstPage = new Promise<void>((resolve) => {
+    releaseFirstPage = resolve
+  })
+  const first: SessionMessage = {
+    id: "msg_first",
+    type: "user",
+    text: "first",
+    time: { created: 1 },
+  }
+  const second: SessionMessage = {
+    id: "msg_second",
+    type: "user",
+    text: "second",
+    time: { created: 0 },
+  }
+  const hydrate = async (url: URL) => {
+    requests.push(url)
+    if (!url.searchParams.has("cursor")) {
+      await firstPage
+      return json({ data: [first], cursor: { next: "cursor-next" } })
+    }
+    return json({ data: [second], cursor: {} })
+  }
+  const calls = createFetch(
+    (url) => (url.pathname === `/api/session/${sessionID}/message` ? hydrate(url) : undefined),
+    events,
+  )
+  let data!: ReturnType<typeof useData>
+  let ready!: () => void
+  const mounted = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+
+  function Probe() {
+    data = useData()
+    onMount(ready)
+    return <box />
+  }
+
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+        <ProjectProvider>
+          <DataProvider>
+            <Probe />
+          </DataProvider>
+        </ProjectProvider>
+      </SDKProvider>
+    </TestTuiContexts>
+  ))
+
+  try {
+    await mounted
+    emitEvent(events, {
+      id: "evt_live_prompt_before_refresh",
+      type: "session.next.prompted",
+      properties: {
+        sessionID,
+        messageID: "msg_live_before",
+        timestamp: 1,
+        prompt: { text: "live before" },
+        delivery: "steer",
+      },
+    })
+    data.session.message.addPending(sessionID, {
+      id: "msg_first",
+      type: "user",
+      text: "optimistic first",
+      time: { created: 1 },
+    })
+    const refreshing = data.session.message.refresh(sessionID)
+    await wait(() => requests.length === 1)
+    emitEvent(events, {
+      id: "evt_live_prompt",
+      type: "session.next.prompted",
+      properties: {
+        sessionID,
+        messageID: "msg_live",
+        timestamp: 2,
+        prompt: { text: "live" },
+        delivery: "steer",
+      },
+    })
+    await wait(() => data.session.message.list(sessionID)?.some((message) => message.id === "msg_live") === true)
+    releaseFirstPage()
+    await refreshing
+
+    expect(requests[0]?.searchParams.get("order")).toBe("desc")
+    expect(requests[0]?.searchParams.has("cursor")).toBeFalse()
+    expect(requests[1]?.searchParams.get("cursor")).toBe("cursor-next")
+    expect(requests[1]?.searchParams.has("order")).toBeFalse()
+    expect(data.session.message.list(sessionID)?.map((message) => message.id)).toEqual([
+      "msg_live",
+      "msg_live_before",
+      "msg_first",
+      "msg_second",
+    ])
+    const hydrated = data.session.message.list(sessionID)?.find((message) => message.id === "msg_first")
+    expect(hydrated?.type).toBe("user")
+    if (hydrated?.type === "user") expect(hydrated.text).toBe("first")
   } finally {
     app.renderer.destroy()
   }

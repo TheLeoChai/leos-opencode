@@ -38,6 +38,7 @@ type Data = {
   session: {
     info: Record<string, SessionV2Info>
     message: Record<string, SessionMessage[]>
+    pending: Record<string, SessionMessage[]>
     permission: Record<string, PermissionV2Request[]>
     question: Record<string, QuestionV2Request[]>
   }
@@ -55,6 +56,16 @@ function locationQuery(ref?: LocationRef) {
   return ref ? { directory: ref.directory, workspace: ref.workspaceID } : undefined
 }
 
+const MessagePageLimit = 100
+
+function mergeMessages(fresh: SessionMessage[], current: SessionMessage[]) {
+  const currentByID = new Map(current.map((message) => [message.id, message]))
+  const freshIDs = new Set(fresh.map((message) => message.id))
+  const hydrated = fresh.map((message) => currentByID.get(message.id) ?? message)
+  const liveOnly = current.filter((message) => !freshIDs.has(message.id))
+  return [...liveOnly, ...hydrated]
+}
+
 export const { use: useData, provider: DataProvider } = createSimpleContext({
   name: "Data",
   init: () => {
@@ -62,6 +73,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
       session: {
         info: {},
         message: {},
+        pending: {},
         permission: {},
         question: {},
       },
@@ -76,6 +88,18 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
     const [defaultLocation, setDefaultLocation] = createSignal<LocationRef>({
       directory: sdk.directory ?? process.cwd(),
     })
+    const revisions = new Map<string, number>()
+    const refreshes = new Map<string, number>()
+    const hydratedRevisions = new Map<string, number>()
+
+    const revision = {
+      get(sessionID: string) {
+        return revisions.get(sessionID) ?? 0
+      },
+      bump(sessionID: string) {
+        revisions.set(sessionID, revision.get(sessionID) + 1)
+      },
+    }
 
     const message = {
       update(sessionID: string, fn: (messages: SessionMessage[]) => void) {
@@ -84,6 +108,27 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           "message",
           produce((draft) => {
             fn((draft[sessionID] ??= []))
+          }),
+        )
+        revision.bump(sessionID)
+      },
+      addPending(sessionID: string, item: SessionMessage) {
+        setStore(
+          "session",
+          "pending",
+          produce((draft) => {
+            const current = (draft[sessionID] ??= [])
+            if (!current.some((message) => message.id === item.id)) current.unshift(item)
+          }),
+        )
+      },
+      removePending(sessionID: string, messageID: string) {
+        setStore(
+          "session",
+          "pending",
+          produce((draft) => {
+            const current = draft[sessionID]
+            if (current) draft[sessionID] = current.filter((message) => message.id !== messageID)
           }),
         )
       },
@@ -150,6 +195,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           })
           break
         case "session.next.prompted": {
+          message.removePending(event.data.sessionID, event.data.messageID)
           message.update(event.data.sessionID, (draft) => {
             message.prepend(draft, {
               id: event.data.messageID,
@@ -163,6 +209,9 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           break
         }
         case "session.next.prompt.admitted":
+          break
+        case "session.next.prompt.cancelled":
+          message.removePending(event.data.sessionID, event.data.messageID)
           break
         case "session.next.context.updated":
           message.update(event.data.sessionID, (draft) => {
@@ -424,11 +473,55 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
         },
         message: {
           list(sessionID: string) {
-            return store.session.message[sessionID]
+            const committed = store.session.message[sessionID]
+            const pending = store.session.pending[sessionID]
+            if (!pending?.length) return committed
+            if (!committed?.length) return pending
+            const committedIDs = new Set(committed.map((message) => message.id))
+            return [...pending.filter((message) => !committedIDs.has(message.id)), ...committed]
+          },
+          addPending(sessionID: string, item: SessionMessage) {
+            message.addPending(sessionID, item)
+          },
+          removePending(sessionID: string, messageID: string) {
+            message.removePending(sessionID, messageID)
           },
           async refresh(sessionID: string) {
-            const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
-            setStore("session", "message", sessionID, result.data.data)
+            const requestID = (refreshes.get(sessionID) ?? 0) + 1
+            refreshes.set(sessionID, requestID)
+            const initialRevision = revision.get(sessionID)
+            const messages: SessionMessage[] = []
+            let cursor: string | undefined
+            do {
+              const result = await sdk.client.v2.session.messages(
+                cursor
+                  ? { sessionID, limit: MessagePageLimit, cursor }
+                  : { sessionID, limit: MessagePageLimit, order: "desc" },
+                { throwOnError: true },
+              )
+              messages.push(...result.data.data)
+              cursor = result.data.cursor.next
+            } while (cursor)
+
+            if (refreshes.get(sessionID) !== requestID) return
+            const current = store.session.message[sessionID] ?? []
+            const currentRevision = revision.get(sessionID)
+            const lastHydratedRevision = hydratedRevisions.get(sessionID)
+            const hasLiveState =
+              currentRevision !== initialRevision ||
+              (lastHydratedRevision === undefined ? current.length > 0 : initialRevision !== lastHydratedRevision)
+            const next = hasLiveState ? mergeMessages(messages, current) : messages
+            const hydratedIDs = new Set(messages.map((message) => message.id))
+            setStore(
+              "session",
+              "pending",
+              produce((draft) => {
+                const pending = draft[sessionID]
+                if (pending) draft[sessionID] = pending.filter((message) => !hydratedIDs.has(message.id))
+              }),
+            )
+            setStore("session", "message", sessionID, next)
+            hydratedRevisions.set(sessionID, currentRevision)
           },
         },
         permission: {

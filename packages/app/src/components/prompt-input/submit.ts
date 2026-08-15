@@ -20,6 +20,7 @@ import { setCursorPosition } from "./editor-dom"
 import { formatServerError } from "@/utils/server-errors"
 import { ScopedKey } from "@/utils/server-scope"
 import { createPromptSubmissionState } from "./submission-state"
+import { isActiveDiveInTrackSession, isDiveInTrackSession, toPromptInput } from "@/utils/dive-in-track"
 
 type PendingPrompt = {
   abort: AbortController
@@ -129,6 +130,9 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
     messageID,
     sessionDirectory: input.draft.sessionDirectory,
   })
+  const isTrackSession = isDiveInTrackSession(input.sync.data.dive_in, input.draft.sessionID)
+  const isActiveTrackSession = isActiveDiveInTrackSession(input.sync.data.dive_in, input.draft.sessionID)
+  if (isTrackSession && !isActiveTrackSession) throw new Error("This DiveIn track is no longer active")
 
   const message: Message = {
     id: messageID,
@@ -139,20 +143,28 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
     model: { ...input.draft.model, variant: input.draft.variant },
   }
 
-  const add = () =>
+  const add = () => {
     input.sync.session.optimistic.add({
       directory: input.draft.sessionDirectory,
       sessionID: input.draft.sessionID,
       message,
       parts: optimisticParts,
     })
+    if (isActiveTrackSession) input.sync.track.optimistic.add({ sessionID: input.draft.sessionID, message, parts: optimisticParts })
+  }
 
-  const remove = () =>
+  const removeLegacy = () => {
     input.sync.session.optimistic.remove({
       directory: input.draft.sessionDirectory,
       sessionID: input.draft.sessionID,
       messageID,
     })
+  }
+
+  const remove = () => {
+    removeLegacy()
+    if (isActiveTrackSession) input.sync.track.optimistic.remove({ sessionID: input.draft.sessionID, messageID })
+  }
 
   batch(() => {
     setBusy()
@@ -166,6 +178,19 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
         remove()
       })
       return false
+    }
+
+    if (isActiveTrackSession) {
+      await input.client.v2.session.prompt({
+        sessionID: input.draft.sessionID,
+        id: messageID,
+        prompt: toPromptInput(requestParts),
+        delivery: "steer",
+      })
+      await input.sync.track.refresh(input.draft.sessionID)
+      removeLegacy()
+      setIdle()
+      return true
     }
 
     await input.client.session.promptAsync({

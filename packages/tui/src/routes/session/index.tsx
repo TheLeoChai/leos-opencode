@@ -20,6 +20,7 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { useRoute, useRouteData } from "../../context/route"
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
+import { useData } from "../../context/data"
 import { useEvent } from "../../context/event"
 import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
@@ -29,6 +30,7 @@ import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, 
 import { Prompt, type PromptRef } from "../../component/prompt"
 import type {
   AssistantMessage,
+  Message,
   Part,
   Provider,
   ToolPart,
@@ -83,6 +85,7 @@ import { getRevertDiffFiles } from "../../util/revert-diff"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 import { usePathFormatter } from "../../context/path-format"
 import { LocationProvider } from "../../context/location"
+import { adaptDiveInMessages, findDiveInTrack, isActiveDiveInTrack } from "../../util/dive-in"
 
 addDefaultParsers(parsers.parsers)
 
@@ -167,6 +170,8 @@ const context = createContext<{
   diffWrapMode: () => "word" | "none"
   providers: () => ReadonlyMap<string, Provider>
   sync: ReturnType<typeof useSync>
+  messages: () => Message[]
+  parts: (messageID: string) => Part[]
   tui: ReturnType<typeof useTuiConfig>
 }>()
 
@@ -187,6 +192,7 @@ export function Session() {
   const route = useRouteData("session")
   const { navigate } = useRoute()
   const sync = useSync()
+  const data = useData()
   const event = useEvent()
   const project = useProject()
   const paths = useTuiPaths()
@@ -211,20 +217,6 @@ export function Session() {
       .filter((x) => x.parentID === parentID || x.id === parentID)
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
-  const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
-  const foregroundTasks = createMemo(() =>
-    sync.data.capabilities.experimentalBackgroundSubagents
-      ? messages().flatMap((message) =>
-          (sync.data.part[message.id] ?? []).filter(
-            (part): part is ToolPart =>
-              part.type === "tool" &&
-              part.tool === "task" &&
-              part.state.status === "running" &&
-              part.state.metadata?.background !== true,
-          ),
-        )
-      : [],
-  )
   const permissions = createMemo(() => {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.permission[x.id] ?? [])
@@ -234,6 +226,7 @@ export function Session() {
     return children().flatMap((x) => sync.data.question[x.id] ?? [])
   })
   const [diveInTrack, setDiveInTrack] = createSignal<DiveInInfo["tracks"][number]>()
+  const canSubmitDiveInTrack = createMemo(() => isActiveDiveInTrack(diveInTrack()))
   const diveInTrackReady = createMemo(() => {
     const current = session()
     const status = current ? sync.data.session_status[current.id] : undefined
@@ -243,14 +236,36 @@ export function Session() {
       (status === undefined || status.type === "idle" || status.type === "retry")
     )
   })
+  const trackTimeline = createMemo(() => {
+    if (!diveInTrack()) return
+    return adaptDiveInMessages({
+      sessionID: route.sessionID,
+      messages: data.session.message.list(route.sessionID) ?? [],
+      session: data.session.get(route.sessionID),
+    })
+  })
+  const messages = createMemo(() => trackTimeline()?.messages ?? sync.data.message[route.sessionID] ?? [])
+  const messageParts = (messageID: string) => trackTimeline()?.parts[messageID] ?? sync.data.part[messageID] ?? []
+  const foregroundTasks = createMemo(() =>
+    sync.data.capabilities.experimentalBackgroundSubagents
+      ? messages().flatMap((message) =>
+          messageParts(message.id).filter(
+            (part): part is ToolPart =>
+              part.type === "tool" &&
+              part.tool === "task" &&
+              part.state.status === "running" &&
+              part.state.metadata?.background !== true,
+          ),
+        )
+      : [],
+  )
   const diveInInitialPrompt = createMemo(() => {
     const prompt = diveInTrack()?.prompt
     if (!prompt) return undefined
     const hasPrompt = messages().some(
       (message) =>
         message.role === "user" &&
-        (sync.data.part[message.id] ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("") ===
-          prompt,
+        messageParts(message.id).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("") === prompt,
     )
     return hasPrompt ? undefined : prompt
   })
@@ -313,13 +328,16 @@ export function Session() {
       .list({ location })
       .then((result) => {
         if (session()?.id !== current.id) return
-        setDiveInTrack(
-          (result.data ?? []).flatMap((group) => group.tracks).find((track) => track.sessionID === current.id),
-        )
+        setDiveInTrack(findDiveInTrack(result.data ?? [], current.id))
       })
       .catch(() => {
         if (session()?.id === current.id) setDiveInTrack(undefined)
       })
+  })
+
+  createEffect(() => {
+    if (!diveInTrack()) return
+    void Promise.all([data.session.refresh(route.sessionID), data.session.message.refresh(route.sessionID)]).catch(() => {})
   })
 
   createEffect(() => {
@@ -427,7 +445,7 @@ export function Session() {
         if (!message) return false
 
         // Check if message has valid non-synthetic, non-ignored text parts
-        const parts = sync.data.part[message.id]
+        const parts = messageParts(message.id)
         if (!parts || !Array.isArray(parts)) return false
 
         return parts.some((part) => part && part.type === "text" && !part.synthetic && !part.ignored)
@@ -814,7 +832,7 @@ export function Session() {
           .then(() => {
             toBottom()
           })
-        const parts = sync.data.part[message.id]
+        const parts = messageParts(message.id)
         prompt?.set(
           parts.reduce(
             (agg, part) => {
@@ -1021,15 +1039,15 @@ export function Session() {
       category: "Session",
       hidden: true,
       run: () => {
-        const messages = sync.data.message[route.sessionID]
-        if (!messages || !messages.length) return
+        const sessionMessages = messages()
+        if (!sessionMessages.length) return
 
         // Find the most recent user message with non-ignored, non-synthetic text parts
-        for (let i = messages.length - 1; i >= 0; i--) {
-          const message = messages[i]
+        for (let i = sessionMessages.length - 1; i >= 0; i--) {
+          const message = sessionMessages[i]
           if (!message || message.role !== "user") continue
 
-          const parts = sync.data.part[message.id]
+          const parts = messageParts(message.id)
           if (!parts || !Array.isArray(parts)) continue
 
           const hasValidTextPart = parts.some(
@@ -1075,7 +1093,7 @@ export function Session() {
           return
         }
 
-        const parts = sync.data.part[lastAssistantMessage.id] ?? []
+        const parts = messageParts(lastAssistantMessage.id)
         const textParts = parts.filter((part) => part.type === "text")
         if (textParts.length === 0) {
           toast.show({ message: "No text parts found in last assistant message", variant: "error" })
@@ -1117,7 +1135,7 @@ export function Session() {
           const sessionMessages = messages()
           const transcript = formatTranscript(
             sessionData,
-            sessionMessages.map((msg) => ({ info: msg, parts: sync.data.part[msg.id] ?? [] })),
+            sessionMessages.map((msg) => ({ info: msg, parts: messageParts(msg.id) })),
             {
               thinking: showThinking(),
               toolDetails: showDetails(),
@@ -1161,7 +1179,7 @@ export function Session() {
 
           const transcript = formatTranscript(
             sessionData,
-            sessionMessages.map((msg) => ({ info: msg, parts: sync.data.part[msg.id] ?? [] })),
+            sessionMessages.map((msg) => ({ info: msg, parts: messageParts(msg.id) })),
             {
               thinking: options.thinking,
               toolDetails: options.toolDetails,
@@ -1352,6 +1370,8 @@ export function Session() {
           diffWrapMode,
           providers,
           sync,
+          messages,
+          parts: messageParts,
           tui: tuiConfig,
         }}
       >
@@ -1463,7 +1483,7 @@ export function Session() {
                             ))
                           }}
                           message={message as UserMessage}
-                          parts={sync.data.part[message.id] ?? []}
+                          parts={messageParts(message.id)}
                           pending={pending()}
                         />
                       </Match>
@@ -1471,7 +1491,7 @@ export function Session() {
                         <AssistantMessage
                           last={lastAssistant()?.id === message.id}
                           message={message as AssistantMessage}
-                          parts={sync.data.part[message.id] ?? []}
+                          parts={messageParts(message.id)}
                         />
                       </Match>
                     </Switch>
@@ -1513,6 +1533,8 @@ export function Session() {
                           toBottom()
                         }}
                         sessionID={route.sessionID}
+                        isDiveInTrack={!!diveInTrack()}
+                        canSubmitDiveInTrack={canSubmitDiveInTrack()}
                         right={<pluginRuntime.Slot name="session_prompt_right" session_id={route.sessionID} />}
                       />
                     </pluginRuntime.Slot>
@@ -1678,7 +1700,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const local = useLocal()
   const { theme } = useTheme()
   const sync = useSync()
-  const messages = createMemo(() => sync.data.message[props.message.sessionID] ?? [])
+  const messages = createMemo(() => ctx.messages())
   const model = createMemo(() => Model.name(ctx.providers(), props.message.providerID, props.message.modelID))
 
   const final = createMemo(() => {

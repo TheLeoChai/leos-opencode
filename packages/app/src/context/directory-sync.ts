@@ -5,6 +5,7 @@ import { produce, reconcile, type SetStoreFunction } from "solid-js/store"
 import type { createServerSdkContext } from "./server-sdk"
 import type { createServerSyncContextInner } from "./server-sync"
 import type { State } from "./global-sync/types"
+import { createTrackSessionSync } from "./track-session"
 
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 const sessionFields = new Set([
@@ -27,9 +28,32 @@ export const createDirSyncContext = (
   const client = serverSDK.createClient({ directory, throwOnError: true })
   const current = createMemo(() => serverSync.child(directory, { mcp: true }))
   const absolute = (path: string) => (current()[0].path.directory + "/" + path).replace("//", "/")
+  const track = createTrackSessionSync({
+    client,
+    tracks: () => current()[0].dive_in,
+    session: serverSync.session.get,
+    listen: (listener) => serverSDK.event.on(directory, listener),
+  })
+  const message = new Proxy(serverSync.session.data.message, {
+    get(target, property, receiver) {
+      if (typeof property !== "string" || !track.isSession(property)) return Reflect.get(target, property, receiver)
+      track.ensure(property)
+      if (track.loaded(property)) return track.messages(property) ?? []
+      const pending = track.messages(property)
+      return pending?.length ? pending : undefined
+    },
+  })
+  const part = new Proxy(serverSync.session.data.part, {
+    get(target, property, receiver) {
+      if (typeof property !== "string" || !track.messageSession(property)) return Reflect.get(target, property, receiver)
+      return track.parts(property) ?? []
+    },
+  })
   const data = new Proxy({} as State, {
     get(_, property: keyof State) {
       if (property === "session_working") return serverSync.session.data.session_working.bind(serverSync.session.data)
+      if (property === "message") return message
+      if (property === "part") return part
       if (sessionFields.has(property)) return serverSync.session.data[property as keyof typeof serverSync.session.data]
       return current()[0][property]
     },
@@ -142,6 +166,11 @@ export const createDirSyncContext = (
           }),
         )
       },
+    },
+    track: {
+      isSession: track.isSession,
+      refresh: track.refresh,
+      optimistic: track.optimistic,
     },
     mcp: {
       toggle: (name: string) => serverSync.mcp.toggle(directory, name),

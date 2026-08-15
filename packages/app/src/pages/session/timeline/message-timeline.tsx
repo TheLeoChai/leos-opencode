@@ -71,6 +71,7 @@ import { useSDK } from "@/context/sdk"
 import { useSync } from "@/context/sync"
 import { notifySessionTabsRemoved } from "@/components/titlebar-session-events"
 import { sessionTitle } from "@/utils/session-title"
+import { diveInInitialPrompt } from "@/utils/dive-in-track"
 import { scheduleConnectedMeasure } from "./measure"
 import { observeElementOffsetReconnectAware } from "./observe-element-offset"
 import { createTimelineProjection } from "./projection"
@@ -311,7 +312,7 @@ export function MessageTimeline(props: {
     const text = message
       ? (sync().data.part[message.id] ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("")
       : ""
-    return text === track.prompt ? undefined : track.prompt
+    return diveInInitialPrompt(track.prompt, text)
   })
   const parentMessages = createMemo(() => {
     const id = parentID()
