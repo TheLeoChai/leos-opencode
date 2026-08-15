@@ -509,6 +509,7 @@ export type SessionsPromptOutput = {
       }>
     }
     readonly delivery: "steer" | "queue"
+    readonly resume?: boolean
     readonly timeCreated: number
     readonly promotedSeq?: number
   }
@@ -807,6 +808,7 @@ export type SessionsHistoryOutput = {
             }>
           }
           readonly delivery: "steer" | "queue"
+          readonly resume?: boolean
         }
       }
     | {
@@ -1273,6 +1275,7 @@ export type SessionsEventsOutput =
           }>
         }
         readonly delivery: "steer" | "queue"
+        readonly resume?: boolean
       }
     }
   | {

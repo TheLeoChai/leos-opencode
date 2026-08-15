@@ -17,6 +17,7 @@ export const create = Effect.fn("OpenCode.create")(function* () {
   )
   const tools = Context.get(context, ApplicationTools.Service)
   const permissions = Context.get(context, PermissionSaved.Service)
+  const handlerContext = Context.makeUnsafe<unknown>(context.mapUnsafe)
   const web = yield* Effect.acquireRelease(
     Effect.sync(() =>
       HttpRouter.toWebHandler(
@@ -29,9 +30,12 @@ export const create = Effect.fn("OpenCode.create")(function* () {
     ),
     (web) => Effect.promise(web.dispose),
   )
-  const fetch = Object.assign((input: RequestInfo | URL, init?: RequestInit) => web.handler(new Request(input, init)), {
-    preconnect: () => undefined,
-  }) satisfies typeof globalThis.fetch
+  const fetch = Object.assign(
+    (input: RequestInfo | URL, init?: RequestInit) => web.handler(new Request(input, init), handlerContext),
+    {
+      preconnect: () => undefined,
+    },
+  ) satisfies typeof globalThis.fetch
   const client = yield* OpenCode.make({ baseUrl: "http://opencode.local" }).pipe(
     Effect.provide(FetchHttpClient.layer),
     Effect.provideService(FetchHttpClient.Fetch, fetch),
