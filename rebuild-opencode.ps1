@@ -8,6 +8,7 @@ $staging = Join-Path $updates $timestamp
 $binary = Join-Path $staging "opencode-windows-x64\bin\opencode.exe"
 $pointer = Join-Path $bin "current.txt"
 $pointerTemp = Join-Path $bin ("current.txt.{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
+$pointerBackup = Join-Path $bin ("current.txt.{0}.bak" -f [Guid]::NewGuid().ToString("N"))
 $relativeTarget = Join-Path (Join-Path "dist\updates" $timestamp) "opencode-windows-x64\bin\opencode.exe"
 $previousBuildDir = $env:OPENCODE_BUILD_DIR
 
@@ -49,7 +50,7 @@ try {
   )
 
   if (Test-Path -LiteralPath $pointer) {
-    [System.IO.File]::Replace($pointerTemp, $pointer, $null)
+    [System.IO.File]::Replace($pointerTemp, $pointer, $pointerBackup)
   } else {
     [System.IO.File]::Move($pointerTemp, $pointer)
   }
@@ -63,4 +64,5 @@ try {
   }
 
   Remove-Item -LiteralPath $pointerTemp -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $pointerBackup -Force -ErrorAction SilentlyContinue
 }
