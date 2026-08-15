@@ -70,6 +70,43 @@ export default {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`dive_in\` (
+          \`id\` text PRIMARY KEY,
+          \`session_id\` text NOT NULL,
+          \`title\` text NOT NULL,
+          \`guidance\` text,
+          \`status\` text NOT NULL,
+          \`synthesis_prompt_id\` text,
+          \`time_created\` integer NOT NULL,
+          \`time_updated\` integer NOT NULL,
+          \`time_completed\` integer,
+          CONSTRAINT \`fk_dive_in_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(`
+        CREATE TABLE \`dive_in_track\` (
+          \`id\` text PRIMARY KEY,
+          \`dive_in_id\` text NOT NULL,
+          \`session_id\` text NOT NULL,
+          \`position\` integer NOT NULL,
+          \`title\` text NOT NULL,
+          \`summary\` text NOT NULL,
+          \`reasoning\` text NOT NULL,
+          \`prompt\` text NOT NULL,
+          \`status\` text NOT NULL,
+          \`satisfied\` integer,
+          \`conclusion\` text,
+          \`investigation_prompt_id\` text,
+          \`handoff_prompt_id\` text,
+          \`handoff\` text,
+          \`time_created\` integer NOT NULL,
+          \`time_updated\` integer NOT NULL,
+          \`time_completed\` integer,
+          CONSTRAINT \`fk_dive_in_track_dive_in_id_dive_in_id_fk\` FOREIGN KEY (\`dive_in_id\`) REFERENCES \`dive_in\`(\`id\`) ON DELETE CASCADE,
+          CONSTRAINT \`fk_dive_in_track_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`event_sequence\` (
           \`aggregate_id\` text PRIMARY KEY,
           \`seq\` integer NOT NULL,
@@ -155,6 +192,15 @@ export default {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`session_input_cancellation\` (
+          \`id\` text PRIMARY KEY,
+          \`session_id\` text NOT NULL,
+          \`cancelled_seq\` integer NOT NULL,
+          \`time_created\` integer NOT NULL,
+          CONSTRAINT \`fk_session_input_cancellation_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`session_input\` (
           \`id\` text PRIMARY KEY,
           \`session_id\` text NOT NULL,
@@ -236,6 +282,15 @@ export default {
           CONSTRAINT \`fk_session_share_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
         );
       `)
+      yield* tx.run(`CREATE INDEX \`dive_in_session_idx\` ON \`dive_in\` (\`session_id\`);`)
+      yield* tx.run(
+        `CREATE UNIQUE INDEX \`dive_in_active_session_idx\` ON \`dive_in\` (\`session_id\`) WHERE "dive_in"."status" = 'active';`,
+      )
+      yield* tx.run(
+        `CREATE UNIQUE INDEX \`dive_in_track_group_position_idx\` ON \`dive_in_track\` (\`dive_in_id\`,\`position\`);`,
+      )
+      yield* tx.run(`CREATE UNIQUE INDEX \`dive_in_track_session_idx\` ON \`dive_in_track\` (\`session_id\`);`)
+      yield* tx.run(`CREATE INDEX \`dive_in_track_group_idx\` ON \`dive_in_track\` (\`dive_in_id\`);`)
       yield* tx.run(`CREATE UNIQUE INDEX \`event_aggregate_seq_idx\` ON \`event\` (\`aggregate_id\`,\`seq\`);`)
       yield* tx.run(`CREATE INDEX \`event_aggregate_type_seq_idx\` ON \`event\` (\`aggregate_id\`,\`type\`,\`seq\`);`)
       yield* tx.run(
@@ -246,6 +301,9 @@ export default {
       )
       yield* tx.run(`CREATE INDEX \`part_message_id_id_idx\` ON \`part\` (\`message_id\`,\`id\`);`)
       yield* tx.run(`CREATE INDEX \`part_session_idx\` ON \`part\` (\`session_id\`);`)
+      yield* tx.run(
+        `CREATE INDEX \`session_input_cancellation_session_idx\` ON \`session_input_cancellation\` (\`session_id\`);`,
+      )
       yield* tx.run(
         `CREATE INDEX \`session_input_session_pending_delivery_seq_idx\` ON \`session_input\` (\`session_id\`,\`promoted_seq\`,\`delivery\`,\`admitted_seq\`);`,
       )

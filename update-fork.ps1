@@ -1,74 +1,82 @@
-param(
-  [Parameter(Mandatory = $true)]
-  [int]$ParentProcessId
-)
-
 $ErrorActionPreference = "Stop"
 $repo = $PSScriptRoot
-$forkBin = Join-Path $repo "packages\opencode\dist\opencode-windows-x64\bin"
-$binary = Join-Path $forkBin "opencode.exe"
+Set-Location -LiteralPath $repo
 
-function Invoke-Checked($command, [string[]]$arguments) {
-  & $command @arguments
+function Get-GitValue([string[]]$arguments) {
+  $output = & git @arguments
   if ($LASTEXITCODE -ne 0) {
-    throw "Command failed: $command $($arguments -join ' ')"
+    throw "Command failed: git $($arguments -join ' ')"
+  }
+
+  return ($output -join "`n").Trim()
+}
+
+function Invoke-GitChecked([string[]]$arguments) {
+  & git @arguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "Command failed: git $($arguments -join ' ')"
   }
 }
 
-function Get-UpstreamRemote {
-  $remote = (& git remote get-url upstream 2>$null)
-  if ($LASTEXITCODE -eq 0 -and $remote) {
-    return "upstream"
-  }
+$rebaseMerge = Get-GitValue @("rev-parse", "--git-path", "rebase-merge")
+$rebaseApply = Get-GitValue @("rev-parse", "--git-path", "rebase-apply")
+$mergeHead = Get-GitValue @("rev-parse", "--git-path", "MERGE_HEAD")
+$cherryPickHead = Get-GitValue @("rev-parse", "--git-path", "CHERRY_PICK_HEAD")
 
-  $remote = (& git remote get-url origin 2>$null)
-  if ($LASTEXITCODE -eq 0 -and $remote -match "anomalyco/opencode(?:\.git)?$") {
-    return "origin"
-  }
-
-  throw "No upstream OpenCode remote found. Add one with: git remote add upstream https://github.com/anomalyco/opencode.git"
+if ((Test-Path -LiteralPath $rebaseMerge) -or (Test-Path -LiteralPath $rebaseApply)) {
+  throw "An existing rebase is in progress. Resolve it before running the canonical updater."
+}
+if (Test-Path -LiteralPath $mergeHead) {
+  throw "A merge is in progress. Resolve it before running the canonical updater."
+}
+if (Test-Path -LiteralPath $cherryPickHead) {
+  throw "A cherry-pick is in progress. Resolve it before running the canonical updater."
 }
 
-function Stop-ForkProcesses {
-  Get-Process opencode -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -eq $binary } |
-    Stop-Process -Force
+$branch = Get-GitValue @("branch", "--show-current")
+if ($branch -ne "leos-opencode") {
+  throw "The canonical updater only runs on branch leos-opencode; current branch is '$branch'."
 }
 
-function Stop-WithRecoveryInstructions($message) {
-  Write-Error $message
-  Write-Host "The repository may still contain a stash or an in-progress rebase. Inspect git status before continuing."
-  exit 1
+$origin = Get-GitValue @("remote", "get-url", "origin")
+if ($origin -notmatch "github\.com[/:]anomalyco/opencode(?:\.git)?$") {
+  throw "Remote origin must point to the official OpenCode repository."
 }
 
-for ($seconds = 0; $seconds -lt 10 -and (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue); $seconds++) {
-  Start-Sleep -Seconds 1
-}
+$backupRef = "backup/leos-opencode-$(Get-Date -Format yyyyMMdd-HHmmssfff)"
+Invoke-GitChecked @("branch", $backupRef)
+Write-Host "Created backup ref $backupRef"
 
-Stop-ForkProcesses
+$dirty = Get-GitValue @("status", "--porcelain=v1", "--untracked-files=all")
+$stashRef = $null
+if ($dirty) {
+  $stashMessage = "leos-opencode updater WIP $(Get-Date -Format yyyyMMdd-HHmmssfff)"
+  Invoke-GitChecked @("stash", "push", "--include-untracked", "-m", $stashMessage)
+  $stashRef = Get-GitValue @("rev-parse", "--verify", "refs/stash")
+  Write-Host "Recorded WIP stash $stashRef. It will be retained."
+}
 
 try {
-  Set-Location -LiteralPath $repo
-  $dirty = git status --porcelain
-  if ($dirty) {
-    Invoke-Checked git @("stash", "push", "--include-untracked", "-m", "fork updater pre-rebase")
-  }
-
-  $remote = Get-UpstreamRemote
-  Invoke-Checked git @("fetch", $remote, "dev:refs/remotes/$remote/dev")
-  & git rebase "$remote/dev"
-  if ($LASTEXITCODE -ne 0) {
-    Stop-WithRecoveryInstructions "Rebase stopped for conflict resolution."
-  }
-
-  if ($dirty) {
-    & git stash pop
-    if ($LASTEXITCODE -ne 0) {
-      Stop-WithRecoveryInstructions "Restoring local changes stopped for conflict resolution."
-    }
-  }
-
-  & "$repo\rebuild-opencode.ps1"
+  Invoke-GitChecked @("fetch", "origin", "dev:refs/remotes/origin/dev")
+  Invoke-GitChecked @("rebase", "origin/dev")
 } catch {
-  Stop-WithRecoveryInstructions $_
+  throw "Update stopped before restoration or build. Resolve the rebase state if needed. The WIP stash remains $stashRef. $_"
+}
+
+if ($stashRef) {
+  try {
+    Invoke-GitChecked @("stash", "apply", "--index", $stashRef)
+  } catch {
+    throw "WIP restoration conflicted. The stash remains $stashRef; resolve the working tree before building. $_"
+  }
+}
+
+& bun install
+if ($LASTEXITCODE -ne 0) {
+  throw "Dependency installation failed after the rebase and WIP restoration. The current pointer was not changed."
+}
+
+& (Join-Path $repo "rebuild-opencode.ps1")
+if ($LASTEXITCODE -ne 0) {
+  throw "The rebase and WIP restoration succeeded, but the staged build failed. The current pointer was not changed."
 }

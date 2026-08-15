@@ -227,6 +227,7 @@ export function createChildStoreManager(input: {
               return referenceQuery.isLoading ? [] : (referenceQuery.data ?? [])
             },
             session: [],
+            dive_in: [],
             sessionTotal: 0,
             session_status: {},
             session_working(id: string) {

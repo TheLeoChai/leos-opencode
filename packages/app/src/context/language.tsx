@@ -28,6 +28,7 @@ export type Locale =
 
 type RawDictionary = typeof en & typeof uiEn
 type Dictionary = i18n.Flatten<RawDictionary>
+type PluralKey = "divein.trackCount" | "divein.cancel.confirm"
 type Source = { dict: Record<string, string> }
 
 function cookie(locale: Locale) {
@@ -220,6 +221,12 @@ export const { use: useLanguage, provider: LanguageProvider } = createSimpleCont
       params?: Record<string, string | number | boolean>,
     ) => string
 
+    const plural = (key: PluralKey, count: number, params?: Record<string, string | number | boolean>) => {
+      const category = new Intl.PluralRules(intl()).select(count)
+      const suffix = category === "one" ? "one" : "other"
+      return t(`${key}.${suffix}` as keyof Dictionary, { ...params, count })
+    }
+
     const label = (value: Locale) => t(LABEL_KEY[value])
 
     createEffect(() => {
@@ -235,6 +242,7 @@ export const { use: useLanguage, provider: LanguageProvider } = createSimpleCont
       locales: LOCALES,
       label,
       t,
+      plural,
       setLocale(next: Locale) {
         setStore("locale", normalizeLocale(next))
       },

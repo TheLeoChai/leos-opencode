@@ -11,6 +11,7 @@ import { usePrompt } from "@/context/prompt"
 import { useSDK } from "@/context/sdk"
 import { useSettings } from "@/context/settings"
 import { useSync } from "@/context/sync"
+import { useServerSync } from "@/context/server-sync"
 import { useTerminal } from "@/context/terminal"
 import { showToast } from "@/utils/toast"
 import { findLast } from "@opencode-ai/core/util/array"
@@ -19,6 +20,7 @@ import { extractPromptFromParts } from "@/utils/prompt"
 import { UserMessage } from "@opencode-ai/sdk/v2"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { createSessionOwnership } from "./session-ownership"
+import { DialogCancelDiveIn } from "@/components/session/dialog-cancel-dive-in"
 
 export type SessionCommandContext = {
   navigateMessageByOffset: (offset: number) => void
@@ -46,6 +48,7 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
   const sdk = useSDK()
   const settings = useSettings()
   const sync = useSync()
+  const serverSync = useServerSync()
   const terminal = useTerminal()
   const layout = useLayout()
   const navigate = useNavigate()
@@ -382,6 +385,55 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     })
   }
 
+  const startDiveIn = () => {
+    const sessionID = params.id
+    if (!sessionID) return
+    const directory = sdk().directory
+    serverSync().session.set("session_status", sessionID, { type: "busy" })
+    void sdk()
+      .client.v2.diveIn.start({ sessionID, guidance: "" })
+      .then(() => serverSync().loadDiveIns(directory))
+      .catch((error) => {
+        showToast({
+          title: language.t("common.requestFailed"),
+          description: error instanceof Error ? error.message : language.t("common.requestFailed"),
+          variant: "error",
+        })
+      })
+      .finally(() => serverSync().session.set("session_status", sessionID, { type: "idle" }))
+  }
+
+  const activeDiveIn = () => {
+    const sessionID = params.id
+    return sessionID
+      ? (sync().data.dive_in ?? []).find((group) => group.sessionID === sessionID && group.status === "active")
+      : undefined
+  }
+
+  const cancelDiveIn = () => {
+    const group = activeDiveIn()
+    if (!group) return
+    void dialog.show(() => (
+      <DialogCancelDiveIn
+        trackCount={group.tracks.length}
+        onConfirm={async () => {
+          try {
+            await sdk().client.v2.diveIn.cancel({ sessionID: group.sessionID, diveInID: group.id })
+            await serverSync().loadDiveIns(sdk().directory)
+            return true
+          } catch (error) {
+            showToast({
+              title: language.t("common.requestFailed"),
+              description: error instanceof Error ? error.message : language.t("common.requestFailed"),
+              variant: "error",
+            })
+            return false
+          }
+        }}
+      />
+    ))
+  }
+
   const fork = () => {
     void openDialog(
       () => import("@/components/dialog-fork"),
@@ -414,6 +466,20 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
   }
 
   const sessionCmds = () => [
+    sessionCommand({
+      id: "session.divein",
+      title: language.t("divein.title"),
+      slash: "divein",
+      disabled: !params.id,
+      onSelect: startDiveIn,
+    }),
+    sessionCommand({
+      id: "session.divein.cancel",
+      title: language.t("divein.cancel.button"),
+      slash: "divein-cancel",
+      disabled: !activeDiveIn(),
+      onSelect: cancelDiveIn,
+    }),
     sessionCommand({
       id: "session.new",
       title: language.t("command.session.new"),

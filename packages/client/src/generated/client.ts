@@ -37,6 +37,18 @@ import type {
   SessionsInterruptOutput,
   SessionsMessageInput,
   SessionsMessageOutput,
+  DiveInListInput,
+  DiveInListOutput,
+  DiveInGetInput,
+  DiveInGetOutput,
+  DiveInStartInput,
+  DiveInStartOutput,
+  DiveInCancelInput,
+  DiveInCancelOutput,
+  DiveInCompleteInput,
+  DiveInCompleteOutput,
+  DiveInReopenInput,
+  DiveInReopenOutput,
   MessagesListInput,
   MessagesListOutput,
   ModelsListInput,
@@ -311,6 +323,8 @@ export function make(options: ClientOptions) {
             path: `/api/session`,
             body: {
               id: input?.["id"],
+              parentID: input?.["parentID"],
+              title: input?.["title"],
               agent: input?.["agent"],
               model: input?.["model"],
               location: input?.["location"],
@@ -492,6 +506,77 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ).then((value) => value.data),
+    },
+    diveIn: {
+      list: (input?: DiveInListInput, requestOptions?: RequestOptions) =>
+        request<DiveInListOutput>(
+          {
+            method: "GET",
+            path: `/api/divein`,
+            query: { location: input?.["location"] },
+            successStatus: 200,
+            declaredStatuses: [401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      get: (input: DiveInGetInput, requestOptions?: RequestOptions) =>
+        request<DiveInGetOutput>(
+          {
+            method: "GET",
+            path: `/api/divein/${encodeURIComponent(input.diveInID)}`,
+            successStatus: 200,
+            declaredStatuses: [404, 401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      start: (input: DiveInStartInput, requestOptions?: RequestOptions) =>
+        request<DiveInStartOutput>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/divein`,
+            body: { guidance: input["guidance"] },
+            successStatus: 200,
+            declaredStatuses: [404, 400, 503, 401],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      cancel: (input: DiveInCancelInput, requestOptions?: RequestOptions) =>
+        request<DiveInCancelOutput>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/divein/${encodeURIComponent(input.diveInID)}/cancel`,
+            successStatus: 204,
+            declaredStatuses: [404, 400, 503, 401],
+            empty: true,
+          },
+          requestOptions,
+        ),
+      complete: (input: DiveInCompleteInput, requestOptions?: RequestOptions) =>
+        request<DiveInCompleteOutput>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/divein/${encodeURIComponent(input.diveInID)}/track/${encodeURIComponent(input.trackID)}/complete`,
+            body: { satisfied: input["satisfied"] },
+            successStatus: 200,
+            declaredStatuses: [404, 400, 503, 401],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      reopen: (input: DiveInReopenInput, requestOptions?: RequestOptions) =>
+        request<DiveInReopenOutput>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/divein/${encodeURIComponent(input.diveInID)}/track/${encodeURIComponent(input.trackID)}/reopen`,
+            successStatus: 200,
+            declaredStatuses: [404, 400, 503, 401],
+            empty: false,
+          },
+          requestOptions,
+        ),
     },
     messages: {
       list: (input: MessagesListInput, requestOptions?: RequestOptions) =>

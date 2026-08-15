@@ -25,6 +25,7 @@ export function createSessionComposerRegionController(input: {
   state: SessionComposerController
   sessionKey: Accessor<string>
   sessionID: Accessor<string | undefined>
+  allowChildPrompt?: Accessor<boolean>
   prompt: PromptInputState
   ready: Accessor<boolean>
   centered: Accessor<boolean>
@@ -130,7 +131,7 @@ export function createSessionComposerRegionController(input: {
     setPromptRef: input.setPromptRef,
     setDockRef: input.setDockRef,
     parentID,
-    child: () => !!parentID(),
+    child: () => !!parentID() && !(input.allowChildPrompt?.() ?? false),
     showComposer: () => !input.state.blocked() || !!parentID(),
     handoffPrompt: () => getSessionHandoff(input.sessionKey())?.prompt,
     promptReady: () => input.prompt.ready() || promptReady(),

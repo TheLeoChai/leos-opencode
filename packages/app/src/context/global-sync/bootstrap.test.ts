@@ -10,6 +10,24 @@ import { ServerScope } from "@/utils/server-scope"
 
 const provider = { all: new Map(), connected: [], default: {} } satisfies NormalizedProviderListResponse
 
+function diveInClient(list: (input: unknown) => Promise<{ data: [] }>) {
+  return {
+    app: { agents: async () => ({ data: [{ name: "build", mode: "primary" }] }) },
+    config: { get: async () => ({ data: {} }) },
+    session: { status: async () => ({ data: {} }) },
+    vcs: { get: async () => ({ data: undefined }) },
+    command: { list: async () => ({ data: [] }) },
+    permission: { list: async () => ({ data: [] }) },
+    question: { list: async () => ({ data: [] }) },
+    v2: {
+      reference: { list: async () => ({ data: { data: [] } }) },
+      diveIn: { list },
+    },
+    mcp: { status: async () => ({ data: {} }) },
+    provider: { list: async () => ({ data: { all: [], connected: [], default: {} } }) },
+  } as unknown as OpencodeClient
+}
+
 function directoryState() {
   return createStore<State>({
     status: "loading",
@@ -24,6 +42,7 @@ function directoryState() {
     config: {},
     path: { state: "", config: "", worktree: "/project", directory: "/project", home: "/home" },
     session: [],
+    dive_in: [],
     sessionTotal: 0,
     session_status: {},
     session_working(id: string) {
@@ -157,6 +176,108 @@ describe("bootstrapDirectory", () => {
 
     expect(session.data.session_status["ses_busy"]?.type).toBe("busy")
     expect(session.data.session_status[stale.id]).toBeUndefined()
+  })
+
+  test("requests DiveIn with the current location for a v2 directory", async () => {
+    const calls: unknown[] = []
+    const [store, setStore] = directoryState()
+
+    await bootstrapDirectory({
+      directory: "/project",
+      scope: ServerScope.local,
+      mcp: false,
+      global: {
+        config: {} satisfies Config,
+        path: { state: "", config: "", worktree: "/project", directory: "/project", home: "/home" },
+        project: [{ id: "project", worktree: "/project" } as Project],
+        provider,
+      },
+      sdk: diveInClient(async (input) => {
+        calls.push(input)
+        return { data: [] }
+      }),
+      store,
+      setStore,
+      vcsCache: { setStore() {} } as unknown as VcsCache,
+      loadSessions() {},
+      translate: (key) => key,
+      queryClient: new QueryClient(),
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(calls).toEqual([{ location: { directory: "/project" } }])
+    expect(store.dive_in).toEqual([])
+  })
+
+  test("requests DiveIn with the stored workspace for a v2 directory", async () => {
+    const calls: unknown[] = []
+    const [store, setStore] = directoryState()
+    setStore("session", [
+      { location: { directory: "/project", workspaceID: "wrk_1" } } as unknown as State["session"][number],
+    ])
+
+    await bootstrapDirectory({
+      directory: "/project",
+      scope: ServerScope.local,
+      mcp: false,
+      global: {
+        config: {} satisfies Config,
+        path: { state: "", config: "", worktree: "/project", directory: "/project", home: "/home" },
+        project: [{ id: "project", worktree: "/project" } as Project],
+        provider,
+      },
+      sdk: diveInClient(async (input) => {
+        calls.push(input)
+        return { data: [] }
+      }),
+      store,
+      setStore,
+      vcsCache: { setStore() {} } as unknown as VcsCache,
+      loadSessions() {},
+      translate: (key) => key,
+      queryClient: new QueryClient(),
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(calls).toEqual([{ location: { directory: "/project", workspace: "wrk_1" } }])
+  })
+
+  test("omits workspace when a directory has ambiguous stored workspaces", async () => {
+    const calls: unknown[] = []
+    const [store, setStore] = directoryState()
+    setStore("session", [
+      { location: { directory: "/project", workspaceID: "wrk_1" } } as unknown as State["session"][number],
+      { location: { directory: "/project", workspaceID: "wrk_2" } } as unknown as State["session"][number],
+      { location: { directory: "/project" } } as unknown as State["session"][number],
+    ])
+
+    await bootstrapDirectory({
+      directory: "/project",
+      scope: ServerScope.local,
+      mcp: false,
+      global: {
+        config: {} satisfies Config,
+        path: { state: "", config: "", worktree: "/project", directory: "/project", home: "/home" },
+        project: [{ id: "project", worktree: "/project" } as Project],
+        provider,
+      },
+      sdk: diveInClient(async (input) => {
+        calls.push(input)
+        return { data: [] }
+      }),
+      store,
+      setStore,
+      vcsCache: { setStore() {} } as unknown as VcsCache,
+      loadSessions() {},
+      translate: (key) => key,
+      queryClient: new QueryClient(),
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(calls).toEqual([{ location: { directory: "/project" } }])
   })
 })
 

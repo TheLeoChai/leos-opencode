@@ -1,14 +1,15 @@
-import { createMemo, createSignal, Show } from "solid-js"
+import { createMemo, createSignal, Show, type Accessor } from "solid-js"
 import { useRouteData } from "../../context/route"
 import { useSync } from "../../context/sync"
 import { useTheme } from "../../context/theme"
 import { SplitBorder } from "../../ui/border"
 import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+import type { DiveInInfo } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 
-export function SubagentFooter() {
+export function SubagentFooter(props: { track: Accessor<DiveInInfo["tracks"][number] | undefined> }) {
   const route = useRouteData("session")
   const sync = useSync()
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
@@ -18,7 +19,9 @@ export function SubagentFooter() {
     const s = session()
     if (!s) return { label: "Subagent", index: 0, total: 0 }
     const agentMatch = s.title.match(/@(\w+) subagent/)
-    const label = agentMatch ? Locale.titlecase(agentMatch[1]) : "Subagent"
+    const label = agentMatch
+      ? Locale.titlecase(agentMatch[1])
+      : Locale.truncate(props.track()?.title ?? (s.parentID ? s.title : "Subagent"), 48)
 
     if (!s.parentID) return { label, index: 0, total: 0 }
 
@@ -66,7 +69,6 @@ export function SubagentFooter() {
     <box flexShrink={0}>
       <box
         paddingTop={1}
-        paddingBottom={1}
         paddingLeft={2}
         paddingRight={1}
         {...SplitBorder}

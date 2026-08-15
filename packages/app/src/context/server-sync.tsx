@@ -59,6 +59,36 @@ type GlobalStore = {
   reload: undefined | "pending" | "complete"
 }
 
+const DIVE_IN_REFRESH_EVENTS = new Set([
+  "divein.updated",
+  "divein.deleted",
+  "session.idle",
+  "session.error",
+  "session.status",
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+])
+const DIVE_IN_REFRESH_DELAY_MS = 100
+type StoredSession = {
+  directory?: string
+  workspaceID?: string
+  location?: {
+    directory?: string
+    workspaceID?: string
+  }
+}
+
+function workspaceForDirectory(sessions: readonly StoredSession[] | undefined, directory: string) {
+  const workspaces = new Set(
+    (sessions ?? [])
+      .filter((item) => (item.location?.directory ?? item.directory) === directory)
+      .map((item) => item.location?.workspaceID ?? item.workspaceID),
+  )
+  if (workspaces.size !== 1) return
+  return workspaces.values().next().value
+}
+
 export const loadMcpQuery = (scope: ServerScope, directory: string, sdk: OpencodeClient) =>
   queryOptions({
     queryKey: [scope, directory, "mcp"] as const,
@@ -109,6 +139,10 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
   const booting = new Map<string, Promise<void>>()
   const sessionLoads = new Map<string, Promise<void>>()
   const sessionMeta = new Map<string, { limit: number }>()
+  const diveInLoads = new Map<string, Promise<void>>()
+  const diveInRefreshes = new Map<string, ReturnType<typeof setTimeout>>()
+  const diveInDirty = new Map<string, number>()
+  const diveInVersions = new Map<string, number>()
 
   const sdkFor = (directory: string) => {
     const key = directoryKey(directory)
@@ -164,6 +198,11 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
   onCleanup(() => {
     if (eventFrame !== undefined) cancelAnimationFrame(eventFrame)
     if (eventTimer !== undefined) clearTimeout(eventTimer)
+    for (const timer of diveInRefreshes.values()) clearTimeout(timer)
+    diveInRefreshes.clear()
+    diveInDirty.clear()
+    diveInVersions.clear()
+    diveInLoads.clear()
   })
 
   const setProjects = (next: Project[] | ((draft: Project[]) => Project[])) => {
@@ -191,6 +230,7 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
         queryClient,
       })
       bootedAt = Date.now()
+      flushDirtyDiveIns()
       return bootedAt
     },
   }))
@@ -239,6 +279,14 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
     onDispose: (directory) => {
       const key = directoryKey(directory)
       queue.clear(key)
+      const timer = diveInRefreshes.get(key)
+      if (timer) {
+        clearTimeout(timer)
+        diveInRefreshes.delete(key)
+      }
+      diveInDirty.delete(key)
+      diveInVersions.delete(key)
+      diveInLoads.delete(key)
       sessionMeta.delete(key)
       sdkCache.delete(key)
       clearProviderRev(serverSDK.scope, key)
@@ -330,6 +378,55 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
     return promise
   }
 
+  const markDiveInDirty = (directory: string) => {
+    const key = directoryKey(directory)
+    if (!key || directory === "global") return
+    const version = (diveInVersions.get(key) ?? 0) + 1
+    diveInVersions.set(key, version)
+    diveInDirty.set(key, version)
+  }
+
+  const consumeDiveInDirty = (key: string, version: number) => {
+    if ((diveInDirty.get(key) ?? 0) <= version) diveInDirty.delete(key)
+  }
+
+  async function loadDiveIns(directory: string) {
+    const key = directoryKey(directory)
+    if (!key) return
+    const timer = diveInRefreshes.get(key)
+    if (timer) {
+      clearTimeout(timer)
+      diveInRefreshes.delete(key)
+    }
+    const bootstrapPending = booting.get(key)
+    if (bootstrapPending) {
+      markDiveInDirty(directory)
+      return bootstrapPending
+    }
+    const pending = diveInLoads.get(key)
+    if (pending) return pending
+    const version = diveInVersions.get(key) ?? 0
+    diveInDirty.delete(key)
+    const workspace = workspaceForDirectory(children.children[key]?.[0].session, directory)
+    const location = workspace ? { directory, workspace } : { directory }
+    const promise = sdkFor(directory)
+      .v2.diveIn.list({ location })
+      .then((result) => {
+        const [, setStore] = children.child(directory, { bootstrap: false })
+        setStore("dive_in", result.data ?? [])
+        consumeDiveInDirty(key, version)
+      })
+      .catch(() => undefined)
+    diveInLoads.set(key, promise)
+    const finish = () => {
+      if (diveInLoads.get(key) !== promise) return
+      diveInLoads.delete(key)
+      if (diveInDirty.has(key)) scheduleDiveInRefresh(directory, 0)
+    }
+    void promise.then(finish, finish)
+    return promise
+  }
+
   async function bootstrapInstance(directory: string) {
     const key = directoryKey(directory)
     if (!key) return
@@ -338,6 +435,8 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
 
     children.pin(key)
     const promise = Promise.resolve().then(async () => {
+      const pendingDiveIn = diveInLoads.get(key)
+      if (pendingDiveIn) await pendingDiveIn
       const child = children.ensureChild(directory)
       const cache = children.vcsCache.get(key)
       if (!cache) return
@@ -367,15 +466,39 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
     void promise.finally(() => {
       booting.delete(key)
       children.unpin(key)
+      if (diveInDirty.has(key)) scheduleDiveInRefresh(directory, 0)
     })
     return promise
   }
 
+  const scheduleDiveInRefresh = (directory: string, delay = DIVE_IN_REFRESH_DELAY_MS) => {
+    const key = directoryKey(directory)
+    if (!key || !children.children[key] || diveInRefreshes.has(key)) return
+    const timer = setTimeout(() => {
+      diveInRefreshes.delete(key)
+      if (!diveInDirty.has(key)) return
+      if (bootingRoot || booting.has(key) || bootstrap.isFetching) return
+      const recent = Date.now() - bootedAt
+      if (recent < 1500) {
+        scheduleDiveInRefresh(directory, Math.max(DIVE_IN_REFRESH_DELAY_MS, 1500 - recent))
+        return
+      }
+      void loadDiveIns(directory)
+    }, delay)
+    diveInRefreshes.set(key, timer)
+  }
+
+  function flushDirtyDiveIns() {
+    for (const directory of Object.keys(children.children)) {
+      if (diveInDirty.has(directory)) scheduleDiveInRefresh(directory, 0)
+    }
+  }
   const unsub = serverSDK.event.listen((e) => {
     const directory = e.name
     const key = directoryKey(directory)
     const event = e.details
     const recent = bootingRoot || Date.now() - bootedAt < 1500
+    const existing = directory === "global" ? undefined : children.children[key]
 
     session.apply(event)
     if (event.type === "session.created" || event.type === "session.updated" || event.type === "session.deleted") {
@@ -403,7 +526,10 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
       return
     }
 
-    const existing = children.children[key]
+    if (DIVE_IN_REFRESH_EVENTS.has(event.type)) {
+      markDiveInDirty(directory)
+      scheduleDiveInRefresh(directory)
+    }
     if (!existing) return
     children.mark(key)
     const [store, setStore] = existing
@@ -489,6 +615,7 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
     get error() {
       return globalStore.error
     },
+    client: sdkFor,
     child: children.child,
     peek: children.peek,
     disableMcp: children.disableMcp,
@@ -496,6 +623,7 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
     // bootstrap,
     updateConfig: updateConfigMutation.mutateAsync,
     project: projectApi,
+    loadDiveIns,
     session,
     homeSessions,
     mcp: {

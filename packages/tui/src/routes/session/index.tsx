@@ -36,6 +36,7 @@ import type {
   TextPart,
   ReasoningPart,
   SessionStatus,
+  DiveInInfo,
 } from "@opencode-ai/sdk/v2"
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
@@ -232,7 +233,30 @@ export function Session() {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.question[x.id] ?? [])
   })
-  const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
+  const [diveInTrack, setDiveInTrack] = createSignal<DiveInInfo["tracks"][number]>()
+  const diveInTrackReady = createMemo(() => {
+    const current = session()
+    const status = current ? sync.data.session_status[current.id] : undefined
+    return (
+      !!current?.parentID &&
+      diveInTrack()?.status === "active" &&
+      (status === undefined || status.type === "idle" || status.type === "retry")
+    )
+  })
+  const diveInInitialPrompt = createMemo(() => {
+    const prompt = diveInTrack()?.prompt
+    if (!prompt) return undefined
+    const hasPrompt = messages().some(
+      (message) =>
+        message.role === "user" &&
+        (sync.data.part[message.id] ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("") ===
+          prompt,
+    )
+    return hasPrompt ? undefined : prompt
+  })
+  const visible = createMemo(
+    () => (!session()?.parentID || !!diveInTrack()) && permissions().length === 0 && questions().length === 0,
+  )
   const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
 
   const pending = createMemo(() => {
@@ -262,8 +286,8 @@ export function Session() {
 
   const wide = createMemo(() => dimensions().width > 120)
   const sidebarVisible = createMemo(() => {
-    if (session()?.parentID) return false
     if (sidebarOpen()) return true
+    if (diveInTrack() && sidebar() === "auto") return true
     if (sidebar() === "auto" && wide()) return true
     return false
   })
@@ -275,6 +299,28 @@ export function Session() {
   const toast = useToast()
   const sdk = useSDK()
   const editor = useEditorContext()
+
+  createEffect(() => {
+    const current = session()
+    if (!current?.parentID) {
+      setDiveInTrack(undefined)
+      return
+    }
+    const location = current.workspaceID
+      ? { directory: current.directory, workspace: current.workspaceID }
+      : { directory: current.directory }
+    void sdk.client.v2.diveIn
+      .list({ location })
+      .then((result) => {
+        if (session()?.id !== current.id) return
+        setDiveInTrack(
+          (result.data ?? []).flatMap((group) => group.tracks).find((track) => track.sessionID === current.id),
+        )
+      })
+      .catch(() => {
+        if (session()?.id === current.id) setDiveInTrack(undefined)
+      })
+  })
 
   createEffect(() => {
     const sessionID = route.sessionID
@@ -455,6 +501,74 @@ export function Session() {
     }
   }
 
+  const completeDiveInTrack = async () => {
+    const current = session()
+    if (!current?.parentID) return
+    const status = sync.data.session_status[current.id]
+    if (!diveInTrackReady()) {
+      toast.show({
+        message:
+          status?.type === "busy"
+            ? "The DiveIn track is still running; wait for it to finish or stop it before marking it complete"
+            : "The DiveIn track is not ready to be marked complete",
+        variant: "warning",
+      })
+      dialog.clear()
+      return
+    }
+    const location = current.workspaceID
+      ? { directory: current.directory, workspace: current.workspaceID }
+      : { directory: current.directory }
+    const groups = await sdk.client.v2.diveIn.list({ location }).then((result) => result.data ?? [])
+    const group = groups.find(
+      (item) => item.status === "active" && item.tracks.some((track) => track.sessionID === current.id),
+    )
+    const track = group?.tracks.find((item) => item.sessionID === current.id)
+    if (!group || !track) {
+      toast.show({ message: "No active DiveIn track found for this session", variant: "warning" })
+      dialog.clear()
+      return
+    }
+    try {
+      await sdk.client.v2.diveIn.complete(
+        { sessionID: group.sessionID, diveInID: group.id, trackID: track.id, satisfied: true },
+        { throwOnError: true },
+      )
+      toast.show({ message: `Track marked complete: ${track.title}`, variant: "success" })
+    } catch (error) {
+      toast.show({ message: errorMessage(error), variant: "error" })
+    }
+    dialog.clear()
+  }
+
+  const reopenDiveInTrack = async () => {
+    const current = session()
+    if (!current?.parentID) return
+    const location = current.workspaceID
+      ? { directory: current.directory, workspace: current.workspaceID }
+      : { directory: current.directory }
+    const groups = await sdk.client.v2.diveIn.list({ location }).then((result) => result.data ?? [])
+    const group = groups.find(
+      (item) => item.status === "active" && item.tracks.some((track) => track.sessionID === current.id),
+    )
+    const track = group?.tracks.find((item) => item.sessionID === current.id && item.status === "completed")
+    if (!group || !track) {
+      toast.show({ message: "No completed DiveIn track found for this session", variant: "warning" })
+      dialog.clear()
+      return
+    }
+    try {
+      await sdk.client.v2.diveIn.reopen(
+        { sessionID: group.sessionID, diveInID: group.id, trackID: track.id },
+        { throwOnError: true },
+      )
+      toast.show({ message: `Track reopened: ${track.title}`, variant: "success" })
+    } catch (error) {
+      toast.show({ message: errorMessage(error), variant: "error" })
+    }
+    dialog.clear()
+  }
+
   const sessionCommandList = createMemo(() => [
     {
       title: session()?.share?.url ? "Copy share link" : "Share session",
@@ -574,6 +688,85 @@ export function Session() {
           modelID: selectedModel.modelID,
           providerID: selectedModel.providerID,
         })
+        dialog.clear()
+      },
+    },
+    {
+      title: "DiveIn",
+      value: "session.divein",
+      category: "Session",
+      enabled: !session()?.parentID,
+      slash: {
+        name: "divein",
+      },
+      run: () => {
+        toast.show({ message: "DiveIn planning started", variant: "info", duration: 10000 })
+        void sdk.client.v2.diveIn
+          .start({ sessionID: route.sessionID, guidance: "" }, { throwOnError: true })
+          .then((result) => {
+            toast.show({
+              message: `DiveIn started with ${result.data.tracks.length} track${result.data.tracks.length === 1 ? "" : "s"}`,
+              variant: "success",
+            })
+          })
+          .catch((error) => toast.show({ message: errorMessage(error), variant: "error" }))
+        dialog.clear()
+      },
+    },
+    {
+      title: "Mark DiveIn track complete",
+      value: "session.divein.complete",
+      category: "Session",
+      enabled: diveInTrackReady(),
+      slash: {
+        name: "divein-done",
+        aliases: ["divein-complete"],
+      },
+      run: completeDiveInTrack,
+    },
+    {
+      title: "Reopen DiveIn track",
+      value: "session.divein.reopen",
+      category: "Session",
+      enabled: !!session()?.parentID && diveInTrack()?.status === "completed",
+      slash: {
+        name: "divein-reopen",
+      },
+      run: reopenDiveInTrack,
+    },
+    {
+      title: "Cancel DiveIn",
+      value: "session.divein.cancel",
+      category: "Session",
+      enabled: route.type === "session",
+      slash: {
+        name: "divein-cancel",
+      },
+      run: async () => {
+        const current = session()
+        if (!current) return
+        const location = current.workspaceID
+          ? { directory: current.directory, workspace: current.workspaceID }
+          : { directory: current.directory }
+        const groups = await sdk.client.v2.diveIn.list({ location }).then((result) => result.data ?? [])
+        const group = groups.find((item) => item.sessionID === route.sessionID && item.status === "active")
+        if (!group) {
+          toast.show({ message: "No active DiveIn found for this session", variant: "warning" })
+          dialog.clear()
+          return
+        }
+        const confirmed = await DialogConfirm.show(
+          dialog,
+          "Cancel DiveIn",
+          `Remove the current ${group.tracks.length} tracks? The main session will be preserved.`,
+        )
+        if (confirmed !== true) return
+        try {
+          await sdk.client.v2.diveIn.cancel({ sessionID: group.sessionID, diveInID: group.id }, { throwOnError: true })
+          toast.show({ message: "DiveIn cancelled", variant: "success" })
+        } catch (error) {
+          toast.show({ message: errorMessage(error), variant: "error" })
+        }
         dialog.clear()
       },
     },
@@ -1173,9 +1366,14 @@ export function Session() {
                 verticalScrollbarOptions={{
                   paddingLeft: 1,
                   visible: showScrollbar(),
+                  showArrows: true,
+                  arrowOptions: {
+                    foregroundColor: theme.textMuted,
+                    backgroundColor: theme.backgroundElement,
+                  },
                   trackOptions: {
                     backgroundColor: theme.backgroundElement,
-                    foregroundColor: theme.border,
+                    foregroundColor: theme.textMuted,
                   },
                 }}
                 stickyScroll={true}
@@ -1184,6 +1382,7 @@ export function Session() {
                 scrollAcceleration={scrollAcceleration()}
               >
                 <box height={1} />
+                <Show when={diveInInitialPrompt()}>{(prompt) => <InitialPromptMessage text={prompt()} />}</Show>
                 <For each={messages()}>
                   {(message, index) => (
                     <Switch>
@@ -1293,29 +1492,31 @@ export function Session() {
                   />
                 </Show>
                 <Show when={session()?.parentID}>
-                  <SubagentFooter />
+                  <SubagentFooter track={diveInTrack} />
                 </Show>
                 <Show when={visible()}>
-                  <pluginRuntime.Slot
-                    name="session_prompt"
-                    mode="replace"
-                    session_id={route.sessionID}
-                    visible={visible()}
-                    disabled={disabled()}
-                    on_submit={toBottom}
-                    ref={bind}
-                  >
-                    <Prompt
+                  <box marginTop={1}>
+                    <pluginRuntime.Slot
+                      name="session_prompt"
+                      mode="replace"
+                      session_id={route.sessionID}
                       visible={visible()}
-                      ref={bind}
                       disabled={disabled()}
-                      onSubmit={() => {
-                        toBottom()
-                      }}
-                      sessionID={route.sessionID}
-                      right={<pluginRuntime.Slot name="session_prompt_right" session_id={route.sessionID} />}
-                    />
-                  </pluginRuntime.Slot>
+                      on_submit={toBottom}
+                      ref={bind}
+                    >
+                      <Prompt
+                        visible={visible()}
+                        ref={bind}
+                        disabled={disabled()}
+                        onSubmit={() => {
+                          toBottom()
+                        }}
+                        sessionID={route.sessionID}
+                        right={<pluginRuntime.Slot name="session_prompt_right" session_id={route.sessionID} />}
+                      />
+                    </pluginRuntime.Slot>
+                  </box>
                 </Show>
               </box>
             </Show>
@@ -1344,6 +1545,26 @@ export function Session() {
         </box>
       </context.Provider>
     </LocationProvider>
+  )
+}
+
+function InitialPromptMessage(props: { text: string }) {
+  const { theme } = useTheme()
+
+  return (
+    <box
+      border={["left"]}
+      customBorderChars={SplitBorder.customBorderChars}
+      borderColor={theme.border}
+      marginBottom={1}
+    >
+      <box paddingTop={1} paddingBottom={1} paddingLeft={2} backgroundColor={theme.backgroundPanel} flexShrink={0}>
+        <text fg={theme.textMuted}>Initial prompt</text>
+        <text fg={theme.text} wrapMode="word" marginTop={1}>
+          {props.text}
+        </text>
+      </box>
+    </box>
   )
 }
 

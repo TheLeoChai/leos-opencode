@@ -19,7 +19,12 @@ import { SessionMessageUpdater } from "@opencode-ai/core/session/message-updater
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionInput } from "@opencode-ai/core/session/input"
-import { SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import {
+  SessionInputCancellationTable,
+  SessionInputTable,
+  SessionMessageTable,
+  SessionTable,
+} from "@opencode-ai/core/session/sql"
 import { testEffect } from "./lib/effect"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 
@@ -93,6 +98,78 @@ describe("SessionProjector", () => {
       expect(
         (yield* db.select({ id: SessionMessageTable.id }).from(SessionMessageTable).all()).map((row) => row.id),
       ).toEqual([boundary])
+    }),
+  )
+
+  it.effect("keeps reverted inputs cancelled across replay", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "test",
+          directory: "/project",
+          title: "test",
+          version: "test",
+        })
+        .run()
+      const events = yield* EventV2.Service
+      const boundary = SessionMessage.ID.make("msg_revert_boundary")
+      const later = SessionMessage.ID.make("msg_revert_later")
+      yield* db.insert(SessionMessageTable).values([assistantRow(boundary, -1), assistantRow(later, 2)]).run()
+      yield* events.publish(SessionEvent.AgentSwitched, {
+        sessionID,
+        messageID: SessionMessage.ID.create(),
+        timestamp: DateTime.makeUnsafe(1),
+        agent: "build",
+      })
+      yield* events.publish(SessionEvent.ModelSwitched, {
+        sessionID,
+        messageID: SessionMessage.ID.create(),
+        timestamp: DateTime.makeUnsafe(2),
+        model,
+      })
+      const admitted = yield* SessionInput.admit(db, events, {
+        id: SessionMessage.ID.make("msg_revert_pending"),
+        sessionID,
+        prompt: Prompt.make({ text: "pending after boundary" }),
+        delivery: "steer",
+      })
+      yield* events.publish(SessionEvent.RevertEvent.Committed, {
+        sessionID,
+        messageID: boundary,
+        timestamp: DateTime.makeUnsafe(4),
+      })
+      expect(yield* SessionInput.find(db, admitted.id)).toBeUndefined()
+      const recorded = yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, sessionID)).all()
+
+      yield* events.remove(sessionID)
+      yield* db.delete(SessionInputTable).where(eq(SessionInputTable.session_id, sessionID)).run()
+      yield* db.delete(SessionInputCancellationTable).where(eq(SessionInputCancellationTable.session_id, sessionID)).run()
+      yield* events.replayAll(
+        recorded.map((event) => ({
+          id: event.id,
+          aggregateID: event.aggregate_id,
+          seq: event.seq,
+          type: event.type,
+          data: event.data,
+        })),
+      )
+
+      expect(yield* SessionInput.find(db, admitted.id)).toBeUndefined()
+      expect(
+        yield* db
+          .select({ id: SessionInputCancellationTable.id })
+          .from(SessionInputCancellationTable)
+          .where(eq(SessionInputCancellationTable.id, admitted.id))
+          .get(),
+      ).toEqual({ id: admitted.id })
     }),
   )
 

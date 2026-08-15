@@ -532,6 +532,13 @@ export default function Page() {
 
   const info = createMemo(() => (params.id ? sync().session.get(params.id) : undefined))
   const isChildSession = createMemo(() => !!info()?.parentID)
+  const diveInTrack = createMemo(() => {
+    const id = params.id
+    return id
+      ? (sync().data.dive_in ?? []).flatMap((group) => group.tracks).find((track) => track.sessionID === id)
+      : undefined
+  })
+  const isDiveInTrack = createMemo(() => !!diveInTrack())
   const diffs = createMemo(() => (params.id ? list(sync().data.session_diff[params.id]) : []))
   const canReview = createMemo(() => !!sync().project)
   const reviewTab = createMemo(() => isDesktop())
@@ -1068,7 +1075,7 @@ export default function Page() {
     }
 
     if (event.key.length === 1 && event.key !== "Unidentified" && !(event.ctrlKey || event.metaKey)) {
-      if (composer.blocked() || isChildSession()) return
+      if (composer.blocked() || (isChildSession() && !isDiveInTrack())) return
       const input = inputRef
       if (!input) return
       input.focus()
@@ -1126,7 +1133,7 @@ export default function Page() {
   }
 
   const focusInput = () => {
-    if (isChildSession()) return
+    if (isChildSession() && !isDiveInTrack()) return
     inputRef?.focus()
   }
 
@@ -1786,7 +1793,12 @@ export default function Page() {
   const queueEnabled = createMemo(() => {
     const id = params.id
     if (!id) return false
-    return settings.general.followup() === "queue" && busy(id) && !composer.blocked() && !isChildSession()
+    return (
+      settings.general.followup() === "queue" &&
+      busy(id) &&
+      !composer.blocked() &&
+      (!isChildSession() || isDiveInTrack())
+    )
   })
 
   const followupText = (item: FollowupDraft) => {
@@ -1966,7 +1978,7 @@ export default function Page() {
     if (followupBusy(sessionID)) return
     if (followup.failed[sessionID] === item.id) return
     if (followup.paused[sessionID]) return
-    if (isChildSession()) return
+    if (isChildSession() && !isDiveInTrack()) return
     if (composer.blocked()) return
     if (busy(sessionID)) return
 
@@ -2166,6 +2178,7 @@ export default function Page() {
             state: composer,
             sessionKey,
             sessionID: () => params.id,
+            allowChildPrompt: isDiveInTrack,
             prompt,
             ready: () => !store.deferRender && messagesReady(),
             centered,
@@ -2174,7 +2187,7 @@ export default function Page() {
               onToggle: () => view().todoCollapsed.set(!view().todoCollapsed.get()),
             },
             followup: () =>
-              params.id && !isChildSession()
+              params.id && (!isChildSession() || isDiveInTrack())
                 ? {
                     items: followupDock(),
                     sending: sendingFollowup(),

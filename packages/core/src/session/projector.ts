@@ -13,7 +13,14 @@ import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { SessionContextEpoch } from "./context-epoch"
-import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
+import {
+  MessageTable,
+  PartTable,
+  SessionInputCancellationTable,
+  SessionInputTable,
+  SessionMessageTable,
+  SessionTable,
+} from "./sql"
 import type { DeepMutable } from "../schema"
 
 type DatabaseService = Database.Interface["db"]
@@ -350,7 +357,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Prompted, (event) =>
       Effect.gen(function* () {
         if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
-        yield* SessionInput.projectPrompted(db, {
+        const projected = yield* SessionInput.projectPrompted(db, {
           id: event.data.messageID,
           sessionID: event.data.sessionID,
           prompt: event.data.prompt,
@@ -358,7 +365,7 @@ const layer = Layer.effectDiscard(
           timeCreated: event.data.timestamp,
           promotedSeq: event.durable.seq,
         })
-        yield* run(db, event)
+        if (projected) yield* run(db, event)
       }),
     )
     yield* events.project(SessionEvent.PromptAdmitted, (event) =>
@@ -370,9 +377,51 @@ const layer = Layer.effectDiscard(
           sessionID: event.data.sessionID,
           prompt: event.data.prompt,
           delivery: event.data.delivery,
+          resume: event.data.resume,
           timeCreated: event.data.timestamp,
         })
       }),
+    )
+    yield* events.project(SessionEvent.PromptCancelled, (event) =>
+      Effect.gen(function* () {
+        if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
+        const input = yield* db
+          .select({ sessionID: SessionInputTable.session_id, promotedSeq: SessionInputTable.promoted_seq })
+          .from(SessionInputTable)
+          .where(eq(SessionInputTable.id, event.data.messageID))
+          .get()
+          .pipe(Effect.orDie)
+        if (input && input.sessionID !== event.data.sessionID)
+          return yield* Effect.die(new SessionInput.LifecycleConflict({ id: event.data.messageID }))
+        const cancellation = yield* db
+          .select({ sessionID: SessionInputCancellationTable.session_id })
+          .from(SessionInputCancellationTable)
+          .where(eq(SessionInputCancellationTable.id, event.data.messageID))
+          .get()
+          .pipe(Effect.orDie)
+        if (cancellation && cancellation.sessionID !== event.data.sessionID)
+          return yield* Effect.die(new SessionInput.LifecycleConflict({ id: event.data.messageID }))
+        if (cancellation) return
+        if (input?.promotedSeq !== null && input?.promotedSeq !== undefined)
+          return yield* Effect.die(new SessionInput.LifecycleConflict({ id: event.data.messageID }))
+        yield* db
+          .insert(SessionInputCancellationTable)
+          .values({
+            id: event.data.messageID,
+            session_id: event.data.sessionID,
+            cancelled_seq: event.durable.seq,
+            time_created: DateTime.toEpochMillis(event.data.timestamp),
+          })
+          .onConflictDoUpdate({
+            target: SessionInputCancellationTable.id,
+            set: {
+              cancelled_seq: event.durable.seq,
+              time_created: DateTime.toEpochMillis(event.data.timestamp),
+            },
+          })
+          .run()
+          .pipe(Effect.orDie)
+      }).pipe(Effect.asVoid),
     )
     yield* events.project(SessionEvent.ContextUpdated, (event) => run(db, event))
     yield* events.project(SessionEvent.Synthetic, (event) => run(db, event))
@@ -414,6 +463,7 @@ const layer = Layer.effectDiscard(
     )
     yield* events.project(SessionEvent.RevertEvent.Committed, (event) =>
       Effect.gen(function* () {
+        if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
         const boundary = yield* db
           .select({ seq: SessionMessageTable.seq })
           .from(SessionMessageTable)
@@ -426,20 +476,35 @@ const layer = Layer.effectDiscard(
           .get()
           .pipe(Effect.orDie)
         if (!boundary) return yield* Effect.die(`Revert boundary message not found: ${event.data.messageID}`)
-        yield* db
-          .delete(SessionMessageTable)
-          .where(
-            and(eq(SessionMessageTable.session_id, event.data.sessionID), gt(SessionMessageTable.seq, boundary.seq)),
-          )
-          .run()
-          .pipe(Effect.orDie)
-        yield* db
-          .delete(SessionInputTable)
+        const cancelled = yield* db
+          .select({ id: SessionInputTable.id, sessionID: SessionInputTable.session_id })
+          .from(SessionInputTable)
           .where(
             and(
               eq(SessionInputTable.session_id, event.data.sessionID),
               or(gt(SessionInputTable.admitted_seq, boundary.seq), gt(SessionInputTable.promoted_seq, boundary.seq)),
             ),
+          )
+          .all()
+          .pipe(Effect.orDie)
+        if (cancelled.length > 0)
+          yield* db
+            .insert(SessionInputCancellationTable)
+            .values(
+              cancelled.map((input) => ({
+                id: input.id,
+                session_id: input.sessionID,
+                cancelled_seq: event.durable!.seq,
+                time_created: DateTime.toEpochMillis(event.data.timestamp),
+              })),
+            )
+            .onConflictDoNothing()
+            .run()
+            .pipe(Effect.orDie)
+        yield* db
+          .delete(SessionMessageTable)
+          .where(
+            and(eq(SessionMessageTable.session_id, event.data.sessionID), gt(SessionMessageTable.seq, boundary.seq)),
           )
           .run()
           .pipe(Effect.orDie)

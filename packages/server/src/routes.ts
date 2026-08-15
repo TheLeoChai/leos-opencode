@@ -1,4 +1,5 @@
 import { Database } from "@opencode-ai/core/database/database"
+import { DiveIn } from "@opencode-ai/core/dive-in"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -29,6 +30,7 @@ const applicationServices = LayerNode.group([
   httpClient,
   ToolOutputStore.cleanupNode,
   SessionV2.node,
+  DiveIn.node,
   PermissionSaved.node,
   PtyTicket.node,
   Credential.node,

@@ -14,12 +14,12 @@ import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
 import { Spinner } from "@opencode-ai/ui/spinner"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
-import { type Session } from "@opencode-ai/sdk/v2/client"
+import { type DiveInInfo, type Session } from "@opencode-ai/sdk/v2/client"
 import { type LocalProject } from "@/context/layout"
 import { useServerSync, useQueryOptions } from "@/context/server-sync"
 import { useLanguage } from "@/context/language"
 import { pathKey } from "@/utils/path-key"
-import { NewSessionItem, SessionItem, SessionSkeleton } from "./sidebar-items"
+import { DiveInTracks, NewSessionItem, SessionItem, SessionSkeleton } from "./sidebar-items"
 import { sortedRootSessions } from "./helpers"
 import { useIsFetching } from "@tanstack/solid-query"
 
@@ -42,6 +42,19 @@ export type WorkspaceSidebarContext = {
   clearHoverProjectSoon: () => void
   prefetchSession: (session: Session, priority?: "high" | "low") => void
   archiveSession: (session: Session) => Promise<void>
+  diveIns: (directory: string, sessionID?: string) => DiveInInfo[]
+  completeDiveInTrack: (
+    directory: string,
+    input: { sessionID: string; diveInID: string; trackID: string },
+  ) => Promise<void>
+  reopenDiveInTrack: (
+    directory: string,
+    input: { sessionID: string; diveInID: string; trackID: string },
+  ) => Promise<void>
+  cancelDiveIn: (
+    directory: string,
+    input: { sessionID: string; diveInID: string; trackSessionIDs: string[] },
+  ) => Promise<boolean>
   workspaceName: (directory: string, projectId?: string, branch?: string) => string | undefined
   renameWorkspace: (directory: string, next: string, projectId?: string, branch?: string) => void
   editorOpen: (id: string) => boolean
@@ -238,6 +251,7 @@ const WorkspaceActions = (props: {
 
 const WorkspaceSessionList = (props: {
   slug: Accessor<string>
+  directory: string
   mobile?: boolean
   ctx: WorkspaceSidebarContext
   showNew: Accessor<boolean>
@@ -246,52 +260,81 @@ const WorkspaceSessionList = (props: {
   hasMore: Accessor<boolean>
   loadMore: () => Promise<void>
   language: ReturnType<typeof useLanguage>
-}): JSX.Element => (
-  <nav class="flex flex-col gap-1">
-    <Show when={props.showNew()}>
-      <NewSessionItem
-        slug={props.slug()}
-        mobile={props.mobile}
-        sidebarExpanded={props.ctx.sidebarExpanded}
-        clearHoverProjectSoon={props.ctx.clearHoverProjectSoon}
-      />
-    </Show>
-    <Show when={props.loading()}>
-      <SessionSkeleton />
-    </Show>
-    <For each={props.sessions()}>
-      {(session) => (
-        <SessionItem
-          session={session}
-          list={props.sessions()}
-          navList={props.ctx.navList}
+}): JSX.Element => {
+  const orphanedDiveIns = createMemo(() => {
+    const sessionIDs = new Set(props.sessions().map((session) => session.id))
+    return props.ctx.diveIns(props.directory).filter((group) => !sessionIDs.has(group.sessionID))
+  })
+
+  return (
+    <nav class="flex flex-col gap-1">
+      <Show when={props.showNew()}>
+        <NewSessionItem
           slug={props.slug()}
           mobile={props.mobile}
-          showChild
           sidebarExpanded={props.ctx.sidebarExpanded}
           clearHoverProjectSoon={props.ctx.clearHoverProjectSoon}
-          prefetchSession={props.ctx.prefetchSession}
-          archiveSession={props.ctx.archiveSession}
         />
-      )}
-    </For>
-    <Show when={props.hasMore()}>
-      <div class="relative w-full py-1">
-        <Button
-          variant="ghost"
-          class="flex w-full text-left justify-start text-14-regular text-text-weak pl-2 pr-10"
-          size="large"
-          onClick={(e: MouseEvent) => {
-            void props.loadMore()
-            ;(e.currentTarget as HTMLButtonElement).blur()
-          }}
-        >
-          {props.language.t("common.loadMore")}
-        </Button>
-      </div>
-    </Show>
-  </nav>
-)
+      </Show>
+      <Show when={props.loading()}>
+        <SessionSkeleton />
+      </Show>
+      <For each={props.sessions()}>
+        {(session) => (
+          <>
+            <SessionItem
+              session={session}
+              list={props.sessions()}
+              navList={props.ctx.navList}
+              slug={props.slug()}
+              mobile={props.mobile}
+              showChild
+              sidebarExpanded={props.ctx.sidebarExpanded}
+              clearHoverProjectSoon={props.ctx.clearHoverProjectSoon}
+              prefetchSession={props.ctx.prefetchSession}
+              archiveSession={props.ctx.archiveSession}
+            />
+            <DiveInTracks
+              groups={() => props.ctx.diveIns(props.directory, session.id)}
+              slug={props.slug()}
+              mobile={props.mobile}
+              clearHoverProjectSoon={props.ctx.clearHoverProjectSoon}
+              complete={(input) => props.ctx.completeDiveInTrack(props.directory, input)}
+              reopen={(input) => props.ctx.reopenDiveInTrack(props.directory, input)}
+              cancel={(input) => props.ctx.cancelDiveIn(props.directory, input)}
+            />
+          </>
+        )}
+      </For>
+      <Show when={orphanedDiveIns().length > 0}>
+        <DiveInTracks
+          groups={orphanedDiveIns}
+          slug={props.slug()}
+          mobile={props.mobile}
+          clearHoverProjectSoon={props.ctx.clearHoverProjectSoon}
+          complete={(input) => props.ctx.completeDiveInTrack(props.directory, input)}
+          reopen={(input) => props.ctx.reopenDiveInTrack(props.directory, input)}
+          cancel={(input) => props.ctx.cancelDiveIn(props.directory, input)}
+        />
+      </Show>
+      <Show when={props.hasMore()}>
+        <div class="relative w-full py-1">
+          <Button
+            variant="ghost"
+            class="flex w-full justify-start text-start text-14-regular text-text-weak ps-2 pe-10"
+            size="large"
+            onClick={(e: MouseEvent) => {
+              void props.loadMore()
+              ;(e.currentTarget as HTMLButtonElement).blur()
+            }}
+          >
+            {props.language.t("common.loadMore")}
+          </Button>
+        </div>
+      </Show>
+    </nav>
+  )
+}
 
 export const SortableWorkspace = (props: {
   ctx: WorkspaceSidebarContext
@@ -428,6 +471,7 @@ export const SortableWorkspace = (props: {
         <Collapsible.Content>
           <WorkspaceSessionList
             slug={slug}
+            directory={props.directory}
             mobile={props.mobile}
             ctx={props.ctx}
             showNew={showNew}
@@ -474,6 +518,7 @@ export const LocalWorkspace = (props: {
     >
       <WorkspaceSessionList
         slug={slug}
+        directory={props.project.worktree}
         mobile={props.mobile}
         ctx={props.ctx}
         showNew={() => false}

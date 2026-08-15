@@ -78,6 +78,8 @@ export type ListInput = typeof ListInput.Type
 
 type CreateInput = {
   id?: SessionSchema.ID
+  parentID?: SessionSchema.ID
+  title?: string
   agent?: AgentV2.ID
   model?: ModelV2.Ref
   location: Location.Ref
@@ -114,6 +116,7 @@ export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
   readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info>
   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info, NotFoundError>
+  readonly remove: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
   readonly messages: (input: {
     sessionID: SessionSchema.ID
     limit?: number
@@ -219,13 +222,14 @@ const layer = Layer.effect(
         const now = Date.now()
         const info = SessionV1.SessionInfo.make({
           id: sessionID,
+          parentID: input.parentID,
           slug: Slug.create(),
           version: InstallationVersion,
           projectID: project.id,
           directory: input.location.directory,
           path: path.relative(project.directory, input.location.directory).replaceAll("\\", "/"),
           workspaceID: input.location.workspaceID ? WorkspaceV2.ID.make(input.location.workspaceID) : undefined,
-          title: `New session - ${new Date(now).toISOString()}`,
+          title: input.title ?? `New session - ${new Date(now).toISOString()}`,
           agent: input.agent,
           model: input.model
             ? {
@@ -264,6 +268,23 @@ const layer = Layer.effect(
         const session = yield* store.get(sessionID)
         if (!session) return yield* new NotFoundError({ sessionID })
         return session
+      }),
+      remove: Effect.fn("V2Session.remove")(function* (sessionID) {
+        const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+        if (!row) return yield* new NotFoundError({ sessionID })
+
+        const children = yield* db
+          .select({ id: SessionTable.id })
+          .from(SessionTable)
+          .where(eq(SessionTable.parent_id, sessionID))
+          .all()
+          .pipe(Effect.orDie)
+        for (const child of children) yield* result.remove(child.id)
+
+        if ((yield* execution.active).has(sessionID)) yield* execution.interrupt(sessionID)
+        const info = legacySessionInfo(row)
+        yield* events.publish(SessionV1.Event.Deleted, { sessionID: info.id, info })
+        yield* events.remove(sessionID)
       }),
       list: Effect.fn("V2Session.list")(function* (input = {}) {
         const direction = input.anchor?.direction ?? "next"
@@ -370,10 +391,14 @@ const layer = Layer.effect(
               sessionID: input.sessionID,
               prompt,
               delivery,
+              resume: input.resume,
             }).pipe(
+              Effect.catchTag("SessionInput.CancellationConflict", () =>
+                Effect.fail(new PromptConflictError({ sessionID: input.sessionID, messageID })),
+              ),
               Effect.catchDefect((defect) =>
                 defect instanceof SessionInput.LifecycleConflict
-                  ? new PromptConflictError({ sessionID: input.sessionID, messageID })
+                  ? Effect.fail(new PromptConflictError({ sessionID: input.sessionID, messageID }))
                   : Effect.die(defect),
               ),
             )
@@ -469,6 +494,35 @@ const resolvePrompt = (input: PromptInput.Prompt) =>
         mime: dataMime ?? (target.endsWith("/") ? "application/x-directory" : FSUtil.mimeType(target)),
       }
     }),
+  })
+
+const legacySessionInfo = (row: typeof SessionTable.$inferSelect) =>
+  Schema.decodeUnknownSync(SessionV1.SessionInfo)({
+    id: row.id,
+    slug: row.slug,
+    projectID: row.project_id,
+    directory: row.directory,
+    title: row.title,
+    version: row.version,
+    ...(row.workspace_id ? { workspaceID: row.workspace_id } : {}),
+    ...(row.path ? { path: row.path } : {}),
+    ...(row.parent_id ? { parentID: row.parent_id } : {}),
+    ...(row.agent ? { agent: row.agent } : {}),
+    ...(row.model
+      ? {
+          model: {
+            id: row.model.id,
+            providerID: row.model.providerID,
+            ...(row.model.variant ? { variant: row.model.variant } : {}),
+          },
+        }
+      : {}),
+    ...(row.metadata ? { metadata: row.metadata } : {}),
+    time: {
+      created: row.time_created,
+      updated: row.time_updated,
+      ...(row.time_archived === null ? {} : { archived: row.time_archived }),
+    },
   })
 
 export const node = makeGlobalNode({

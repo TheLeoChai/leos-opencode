@@ -33,6 +33,25 @@ type GlobalStore = {
   reload: undefined | "pending" | "complete"
 }
 
+type StoredSession = {
+  directory?: string
+  workspaceID?: string
+  location?: {
+    directory?: string
+    workspaceID?: string
+  }
+}
+
+function workspaceForDirectory(sessions: readonly StoredSession[], directory: string) {
+  const workspaces = new Set(
+    sessions
+      .filter((item) => (item.location?.directory ?? item.directory) === directory)
+      .map((item) => item.location?.workspaceID ?? item.workspaceID),
+  )
+  if (workspaces.size !== 1) return
+  return workspaces.values().next().value
+}
+
 function waitForPaint() {
   return new Promise<void>((resolve) => {
     let done = false
@@ -236,8 +255,9 @@ export async function bootstrapDirectory(input: {
   const rev = (providerRev.get(revKey) ?? 0) + 1
   providerRev.set(revKey, rev)
   ;(async () => {
+    const sessions = Promise.resolve(input.loadSessions(input.directory))
     const slow = [
-      () => Promise.resolve(input.loadSessions(input.directory)),
+      () => sessions,
       () =>
         input.queryClient
           .ensureQueryData(loadAgentsQuery(input.scope, input.directory, input.sdk))
@@ -350,7 +370,15 @@ export async function bootstrapDirectory(input: {
             )
           }),
         ),
-      () => Promise.resolve(input.loadSessions(input.directory)),
+      () =>
+        sessions.then(async () => {
+          const diveIn = input.sdk.v2?.diveIn?.list
+          if (!diveIn) return
+          const workspace = workspaceForDirectory(input.store.session, input.directory)
+          const location = workspace ? { directory: input.directory, workspace } : { directory: input.directory }
+          const result = await diveIn({ location }).catch(() => undefined)
+          input.setStore("dive_in", result?.data ?? [])
+        }),
       input.mcp && (() => input.queryClient.fetchQuery(loadMcpQuery(input.scope, input.directory, input.sdk))),
       input.mcp && (() => input.queryClient.fetchQuery(loadMcpResourcesQuery(input.scope, input.directory, input.sdk))),
       () =>

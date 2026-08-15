@@ -33,6 +33,7 @@ import { KeybindV2 } from "@opencode-ai/ui/v2/keybind-v2"
 import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
 import { reviewTooltipKeybind } from "../command-tooltip-keybind"
 import { useTitlebarRightMount } from "../titlebar"
+import { DiveInHeader } from "./dive-in-header"
 
 const OPEN_APPS = [
   "vscode",
@@ -322,6 +323,9 @@ export function SessionHeader() {
       <Show when={rightMount()}>
         {(mount) => (
           <Portal mount={mount()}>
+            <Show when={params.id}>
+              <DiveInHeader />
+            </Show>
             <Show
               when={isV2}
               fallback={

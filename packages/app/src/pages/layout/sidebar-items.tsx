@@ -1,4 +1,4 @@
-import type { Session } from "@opencode-ai/sdk/v2/client"
+import type { DiveInInfo, Session } from "@opencode-ai/sdk/v2/client"
 import { Avatar } from "@opencode-ai/ui/avatar"
 import { Icon } from "@opencode-ai/ui/icon"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
@@ -17,6 +17,9 @@ import { messageAgentColor } from "@/utils/agent"
 import { sessionTitle } from "@/utils/session-title"
 import { sessionPermissionRequest } from "../session/composer/session-request-tree"
 import { childSessionOnPath, getProjectAvatarSource, hasProjectPermissions } from "./helpers"
+import { diveInTrackState } from "./dive-in-status"
+import { useDialog } from "@opencode-ai/ui/context/dialog"
+import { DialogCancelDiveIn } from "../../components/session/dialog-cancel-dive-in"
 
 export const ProjectIcon = (props: {
   project: LocalProject
@@ -276,6 +279,151 @@ export const SessionItem = (props: SessionItemProps): JSX.Element => {
         )}
       </Show>
     </>
+  )
+}
+
+const diveInTrackStatusLabel = (
+  language: ReturnType<typeof useLanguage>,
+  state: ReturnType<typeof diveInTrackState>,
+) => {
+  if (state === "working") return language.t("divein.status.working")
+  if (state === "retrying") return language.t("divein.status.retrying")
+  if (state === "ready") return language.t("divein.status.ready")
+  if (state === "done") return language.t("divein.status.done")
+  if (state === "closed") return language.t("divein.status.closed")
+  return language.t("divein.status.queued")
+}
+
+export const DiveInTracks = (props: {
+  groups: Accessor<DiveInInfo[]>
+  slug: string
+  mobile?: boolean
+  clearHoverProjectSoon: () => void
+  complete: (input: { diveInID: string; sessionID: string; trackID: string }) => Promise<void>
+  reopen: (input: { diveInID: string; sessionID: string; trackID: string }) => Promise<void>
+  cancel: (input: { diveInID: string; sessionID: string; trackSessionIDs: string[] }) => Promise<boolean>
+}): JSX.Element => {
+  const language = useLanguage()
+  const serverSync = useServerSync()
+  const dialog = useDialog()
+
+  return (
+    <div class="ms-6 flex flex-col gap-0.5 border-s border-border-weak-base ps-2">
+      <For each={props.groups()}>
+        {(group) => (
+          <div class="group/dive-group flex flex-col gap-0.5 py-1">
+            <div class="flex items-center gap-1 px-1 text-12-medium text-text-weak">
+              <Icon name="branch" size="small" class="shrink-0" />
+              <span class="min-w-0 flex-1 truncate">{group.title}</span>
+              <span class="shrink-0 text-11-regular text-text-weaker">
+                {language.plural("divein.trackCount", group.tracks.length, { count: group.tracks.length })}
+              </span>
+              <Show when={group.status === "completed"}>
+                <Icon name="check-small" size="small" class="ms-0.5 shrink-0 text-icon-success-base" />
+              </Show>
+              <Show when={group.status === "active"}>
+                <Tooltip value={language.t("divein.cancel.button")} placement="top">
+                  <IconButton
+                    icon="close-small"
+                    variant="ghost"
+                    class="size-5 shrink-0 rounded-md text-icon-weak hover:text-icon-critical-base"
+                    aria-label={language.t("divein.cancel.button")}
+                    onClick={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      void dialog.show(() => (
+                        <DialogCancelDiveIn
+                          trackCount={group.tracks.length}
+                          onConfirm={() =>
+                            props.cancel({
+                              diveInID: group.id,
+                              sessionID: group.sessionID,
+                              trackSessionIDs: group.tracks.map((track) => track.sessionID),
+                            })
+                          }
+                        />
+                      ))
+                    }}
+                  />
+                </Tooltip>
+              </Show>
+            </div>
+            <For each={group.tracks}>
+              {(track) => {
+                const state = () => diveInTrackState(track, serverSync().session.data.session_status[track.sessionID])
+                return (
+                  <div class="group/dive-track flex min-w-0 items-center gap-1 rounded-md pe-1 hover:bg-surface-raised-base-hover">
+                    <A
+                      href={`/${props.slug}/session/${track.sessionID}`}
+                      class="flex min-w-0 flex-1 items-center gap-1.5 px-1 py-0.5 text-start focus:outline-none"
+                      title={track.summary}
+                      onClick={() => {
+                        if (!props.mobile) props.clearHoverProjectSoon()
+                      }}
+                    >
+                      <Switch>
+                        <Match when={state() === "working"}>
+                          <Spinner class="size-3.5 shrink-0 text-text-interactive-base" />
+                        </Match>
+                        <Match when={state() === "retrying"}>
+                          <Spinner class="size-3.5 shrink-0 text-icon-warning-base" />
+                        </Match>
+                        <Match when={state() === "done"}>
+                          <Icon name="check-small" size="small" class="shrink-0 text-icon-success-base" />
+                        </Match>
+                        <Match when={state() === "closed"}>
+                          <div class="size-1.5 shrink-0 rounded-full bg-icon-weak-base" />
+                        </Match>
+                        <Match when={state() === "ready"}>
+                          <div class="size-1.5 shrink-0 rounded-full bg-icon-success-base" />
+                        </Match>
+                        <Match when={state() === "queued"}>
+                          <div class="size-1.5 shrink-0 rounded-full bg-text-weaker" />
+                        </Match>
+                      </Switch>
+                      <span class="min-w-0 flex-1 truncate text-12-regular text-text-base">{track.title}</span>
+                      <span class="shrink-0 text-11-regular text-text-weaker">
+                        {diveInTrackStatusLabel(language, state())}
+                      </span>
+                    </A>
+                    <Show when={track.status === "active"}>
+                      <Tooltip value={language.t("divein.markComplete")} placement="top">
+                        <IconButton
+                          icon="check-small"
+                          variant="ghost"
+                          class="size-5 shrink-0 rounded-md opacity-0 group-hover/dive-track:opacity-100 focus:opacity-100"
+                          aria-label={language.t("divein.markComplete")}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            void props.complete({ diveInID: group.id, sessionID: group.sessionID, trackID: track.id })
+                          }}
+                        />
+                      </Tooltip>
+                    </Show>
+                    <Show when={track.status === "completed" && group.status === "active"}>
+                      <Tooltip value={language.t("divein.reopen")} placement="top">
+                        <IconButton
+                          icon="arrow-undo-down"
+                          variant="ghost"
+                          class="size-5 shrink-0 rounded-md opacity-0 group-hover/dive-track:opacity-100 focus:opacity-100"
+                          aria-label={language.t("divein.reopen")}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            void props.reopen({ diveInID: group.id, sessionID: group.sessionID, trackID: track.id })
+                          }}
+                        />
+                      </Tooltip>
+                    </Show>
+                  </div>
+                )
+              }}
+            </For>
+          </div>
+        )}
+      </For>
+    </div>
   )
 }
 

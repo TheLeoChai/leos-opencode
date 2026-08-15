@@ -73,6 +73,22 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
 
   const [head, ...tail] = text.split(" ")
   const cmd = head?.startsWith("/") ? head.slice(1) : undefined
+  if (cmd === "divein") {
+    setBusy()
+    try {
+      await input.client.v2.diveIn.start({
+        sessionID: input.draft.sessionID,
+        guidance: tail.join(" ").trim(),
+      })
+      await input.serverSync.loadDiveIns(input.draft.sessionDirectory)
+      setIdle()
+      return true
+    } catch (err) {
+      setIdle()
+      throw err
+    }
+  }
+
   if (cmd && input.sync.data.command.find((item) => item.name === cmd)) {
     setBusy()
     try {
@@ -471,6 +487,25 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       const [cmdName, ...args] = text.split(" ")
       const commandName = cmdName.slice(1)
       const customCommand = sync().data.command.find((c) => c.name === commandName)
+      if (commandName === "divein") {
+        clearInput()
+        serverSync().session.set("session_status", session.id, { type: "busy" })
+        void sdk()
+          .client.v2.diveIn.start({
+            sessionID: session.id,
+            guidance: args.join(" ").trim(),
+          })
+          .then(() => serverSync().loadDiveIns(sessionDirectory))
+          .catch((err) => {
+            showToast({
+              title: language.t("prompt.toast.promptSendFailed.title"),
+              description: errorMessage(err),
+            })
+            restoreInput()
+          })
+          .finally(() => serverSync().session.set("session_status", session.id, { type: "idle" }))
+        return
+      }
       if (customCommand) {
         clearInput()
         client.session

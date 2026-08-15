@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect, Fiber, Layer, Stream } from "effect"
+import { DateTime, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import { eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -15,8 +15,14 @@ import { Prompt } from "@opencode-ai/core/session/prompt"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
+import { SessionExecutionLocal } from "@opencode-ai/core/session/execution/local"
 import { SessionInput } from "@opencode-ai/core/session/input"
-import { SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import {
+  SessionInputCancellationTable,
+  SessionInputTable,
+  SessionMessageTable,
+  SessionTable,
+} from "@opencode-ai/core/session/sql"
 import { SessionStore } from "@opencode-ai/core/session/store"
 import { testEffect } from "./lib/effect"
 
@@ -118,6 +124,59 @@ describe("SessionV2.prompt", () => {
     }),
   )
 
+  it.effect("does not recover admitted inputs when resume is false", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const pendingID = SessionMessage.ID.create()
+      yield* session.prompt({ id: pendingID, sessionID, prompt: { text: "recover this" }, resume: false })
+      const recovered: SessionV2.ID[] = []
+      const { db } = yield* Database.Service
+      yield* SessionExecutionLocal.recoverPending(
+        db,
+        (recoveredSessionID) => Effect.sync(() => recovered.push(recoveredSessionID)),
+      )
+      expect(recovered).toEqual([])
+    }),
+  )
+
+  it.effect("recovers admitted inputs when resume is omitted or true", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const { db } = yield* Database.Service
+      const resumedSessionID = SessionV2.ID.make("ses_prompt_recovery_true")
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: resumedSessionID,
+          project_id: Project.ID.global,
+          slug: "recovery-true",
+          directory: "/project",
+          title: "recovery-true",
+          version: "test",
+        })
+        .run()
+        .pipe(Effect.orDie)
+      const omittedID = SessionMessage.ID.create()
+      const trueID = SessionMessage.ID.create()
+      yield* session.prompt({ id: omittedID, sessionID, prompt: { text: "recover omitted" } })
+      yield* session.prompt({
+        id: trueID,
+        sessionID: resumedSessionID,
+        prompt: { text: "recover true" },
+        resume: true,
+      })
+      const recovered: SessionV2.ID[] = []
+      yield* SessionExecutionLocal.recoverPending(
+        db,
+        (recoveredSessionID) => Effect.sync(() => recovered.push(recoveredSessionID)),
+      )
+      expect(recovered).toHaveLength(2)
+      expect(recovered).toEqual(expect.arrayContaining([sessionID, resumedSessionID]))
+    }),
+  )
+
   it.effect("delegates process-local interruption through SessionExecution", () =>
     Effect.gen(function* () {
       yield* setup
@@ -158,6 +217,7 @@ describe("SessionV2.prompt", () => {
         sessionID,
         prompt: { text: "Fix the failing tests" },
         delivery: "steer",
+        resume: false,
       })
     }),
   )
@@ -440,6 +500,78 @@ describe("SessionV2.prompt", () => {
       expect(yield* admitted(messageID)).toMatchObject({ id: messageID, prompt: { text: "Replay pending" } })
       expect(yield* session.messages({ sessionID })).toEqual([])
       expect(wakeCalls).toEqual([])
+    }),
+  )
+
+  it.effect("does not resurrect a cancelled prompt during replay", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const prompt = Prompt.make({ text: "Cancel before promotion" })
+
+      yield* session.prompt({ id: messageID, sessionID, prompt, resume: false })
+      yield* SessionInput.cancel(db, events, { sessionID, messageID })
+      yield* events.publish(SessionEvent.Prompted, {
+        sessionID,
+        messageID,
+        timestamp: yield* DateTime.now,
+        prompt,
+        delivery: "steer",
+      })
+
+      const recorded = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, sessionID))
+        .all()
+        .pipe(Effect.orDie)
+      yield* events.remove(sessionID)
+      yield* db.delete(SessionInputTable).where(eq(SessionInputTable.session_id, sessionID)).run().pipe(Effect.orDie)
+      yield* db.delete(SessionMessageTable).where(eq(SessionMessageTable.session_id, sessionID)).run().pipe(Effect.orDie)
+      yield* db
+        .delete(SessionInputCancellationTable)
+        .where(eq(SessionInputCancellationTable.session_id, sessionID))
+        .run()
+        .pipe(Effect.orDie)
+      yield* events.replayAll(
+        recorded.map((event) => ({
+          id: event.id,
+          aggregateID: event.aggregate_id,
+          seq: event.seq,
+          type: event.type,
+          data: event.data,
+        })),
+      )
+
+      expect(yield* SessionInput.find(db, messageID)).toBeUndefined()
+      expect(yield* session.messages({ sessionID })).toEqual([])
+      expect(
+        yield* db
+          .select({ id: SessionInputCancellationTable.id })
+          .from(SessionInputCancellationTable)
+          .where(eq(SessionInputCancellationTable.id, messageID))
+          .get(),
+      ).toEqual({ id: messageID })
+    }),
+  )
+
+  it.effect("does not cancel an input after it is promoted", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const prompt = Prompt.make({ text: "Already promoted" })
+
+      yield* session.prompt({ id: messageID, sessionID, prompt, resume: false })
+      yield* SessionInput.promoteSteers(db, events, sessionID, Number.MAX_SAFE_INTEGER)
+      const result = yield* SessionInput.cancel(db, events, { sessionID, messageID }).pipe(Effect.exit)
+
+      expect(Exit.isFailure(result)).toBe(true)
+      expect(yield* SessionInput.find(db, messageID)).toHaveProperty("promotedSeq")
+      expect(yield* session.messages({ sessionID })).toHaveLength(1)
     }),
   )
 

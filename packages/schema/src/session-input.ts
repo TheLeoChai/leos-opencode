@@ -18,6 +18,7 @@ export const Admitted = Schema.Struct({
   sessionID: SessionID,
   prompt: Prompt,
   delivery: Delivery,
+  resume: Schema.Boolean.pipe(optional),
   timeCreated: DateTimeUtcFromMillis,
   promotedSeq: NonNegativeInt.pipe(optional),
 }).annotate({ identifier: "SessionInput.Admitted" })

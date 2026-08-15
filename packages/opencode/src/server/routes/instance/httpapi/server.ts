@@ -51,6 +51,7 @@ import { Worktree } from "@/worktree"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
 import { Database } from "@opencode-ai/core/database/database"
+import { DiveIn } from "@opencode-ai/core/dive-in"
 import { AppNodeBuilderV1 } from "@/effect/app-node-builder-v1"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
@@ -272,6 +273,10 @@ export function createRoutes(
   corsOptions?: CorsOptions,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
   const locationServiceMapV2 = buildLocationServiceMap()
+  const sessionServices = AppNodeBuilderV1.build(LayerNode.group([SessionV2.node, DiveIn.node]), [
+    [LocationServiceMap.node, locationServiceMapV2],
+    [SessionExecution.node, SessionExecutionLocal.node],
+  ])
 
   return Layer.mergeAll(
     rootApiRoutes,
@@ -296,10 +301,7 @@ export function createRoutes(
     Layer.provide(locationLayer),
     Layer.provide(PtyEnvironment.layer),
     Layer.provide(
-      AppNodeBuilderV1.build(SessionV2.node, [
-        [LocationServiceMap.node, locationServiceMapV2],
-        [SessionExecution.node, SessionExecutionLocal.node],
-      ]),
+      sessionServices,
     ),
     Layer.provide(locationServiceMapV2),
 

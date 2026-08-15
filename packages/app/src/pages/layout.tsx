@@ -1867,6 +1867,55 @@ export default function LegacyLayout(props: ParentProps) {
     clearHoverProjectSoon,
     prefetchSession,
     archiveSession,
+    diveIns: (directory, sessionID) => {
+      const groups = serverSync().child(directory, { bootstrap: false })[0].dive_in ?? []
+      return sessionID ? groups.filter((group) => group.sessionID === sessionID) : groups
+    },
+    completeDiveInTrack: async (directory, input) => {
+      try {
+        await serverSync()
+          .client(directory)
+          .v2.diveIn.complete({ ...input, satisfied: true })
+        await serverSync().loadDiveIns(directory)
+      } catch (error) {
+        showToast({
+          title: language.t("common.requestFailed"),
+          description: errorMessage(error, language.t("common.requestFailed")),
+          variant: "error",
+        })
+      }
+    },
+    reopenDiveInTrack: async (directory, input) => {
+      try {
+        await serverSync().client(directory).v2.diveIn.reopen(input)
+        await serverSync().loadDiveIns(directory)
+      } catch (error) {
+        showToast({
+          title: language.t("common.requestFailed"),
+          description: errorMessage(error, language.t("common.requestFailed")),
+          variant: "error",
+        })
+      }
+    },
+    cancelDiveIn: async (directory, input) => {
+      const current = params.id ? serverSync().session.get(params.id) : undefined
+      try {
+        await serverSync().client(directory).v2.diveIn.cancel({
+          sessionID: input.sessionID,
+          diveInID: input.diveInID,
+        })
+        await serverSync().loadDiveIns(directory)
+        if (current && input.trackSessionIDs.includes(current.id)) navigate(`/${params.dir}/session/${input.sessionID}`)
+        return true
+      } catch (error) {
+        showToast({
+          title: language.t("common.requestFailed"),
+          description: errorMessage(error, language.t("common.requestFailed")),
+          variant: "error",
+        })
+        return false
+      }
+    },
     workspaceName,
     renameWorkspace,
     editorOpen,

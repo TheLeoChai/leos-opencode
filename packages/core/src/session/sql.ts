@@ -18,6 +18,7 @@ import type { Revert } from "@opencode-ai/schema/revert"
 type SessionMessageData = Omit<(typeof SessionMessage.Message)["Encoded"], "type" | "id">
 type V1MessageData = Omit<SessionV1.Info, "id" | "sessionID">
 type V1PartData = Omit<SessionV1.Part, "id" | "sessionID" | "messageID">
+type SessionInputPrompt = Prompt & { readonly resume?: boolean }
 
 export const SessionTable = sqliteTable(
   "session",
@@ -145,7 +146,7 @@ export const SessionInputTable = sqliteTable(
       .$type<SessionSchema.ID>()
       .notNull()
       .references(() => SessionTable.id, { onDelete: "cascade" }),
-    prompt: text({ mode: "json" }).notNull().$type<Prompt>(),
+    prompt: text({ mode: "json" }).notNull().$type<SessionInputPrompt>(),
     delivery: text().$type<SessionInput.Delivery>().notNull(),
     admitted_seq: integer().notNull(),
     promoted_seq: integer(),
@@ -163,6 +164,20 @@ export const SessionInputTable = sqliteTable(
     uniqueIndex("session_input_session_admitted_seq_idx").on(table.session_id, table.admitted_seq),
     uniqueIndex("session_input_session_promoted_seq_idx").on(table.session_id, table.promoted_seq),
   ],
+)
+
+export const SessionInputCancellationTable = sqliteTable(
+  "session_input_cancellation",
+  {
+    id: text().$type<SessionMessage.ID>().primaryKey(),
+    session_id: text()
+      .$type<SessionSchema.ID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    cancelled_seq: integer().notNull(),
+    time_created: integer().notNull(),
+  },
+  (table) => [index("session_input_cancellation_session_idx").on(table.session_id)],
 )
 
 export const SessionContextEpochTable = sqliteTable("session_context_epoch", {

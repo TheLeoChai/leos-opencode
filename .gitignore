@@ -32,6 +32,10 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+/bin/current.txt
+/bin/current.txt.tmp
+/bin/current.txt.*.tmp
+/dist/updates/
 
 # Secrets and local state
 .env.*

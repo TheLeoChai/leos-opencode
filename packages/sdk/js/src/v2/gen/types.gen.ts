@@ -21,6 +21,7 @@ export type Event =
   | EventSessionNextMoved
   | EventSessionNextPrompted
   | EventSessionNextPromptAdmitted
+  | EventSessionNextPromptCancelled
   | EventSessionNextContextUpdated
   | EventSessionNextSynthetic
   | EventSessionNextShellStarted
@@ -67,6 +68,8 @@ export type Event =
   | EventQuestionV2Asked
   | EventQuestionV2Replied
   | EventQuestionV2Rejected
+  | EventDiveinUpdated
+  | EventDiveinDeleted
   | EventTodoUpdated
   | EventLspUpdated
   | EventPermissionAsked
@@ -872,6 +875,15 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.prompt.cancelled"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageID: string
+        }
+      }
+    | {
+        id: string
         type: "session.next.context.updated"
         properties: {
           timestamp: number
@@ -1360,6 +1372,23 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "divein.updated"
+        properties: {
+          diveInID: string
+          sessionID: string
+          status: "active" | "completed" | "closed"
+        }
+      }
+    | {
+        id: string
+        type: "divein.deleted"
+        properties: {
+          diveInID: string
+          sessionID: string
+        }
+      }
+    | {
+        id: string
         type: "todo.updated"
         properties: {
           sessionID: string
@@ -1613,6 +1642,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextMoved
     | SyncEventSessionNextPrompted
     | SyncEventSessionNextPromptAdmitted
+    | SyncEventSessionNextPromptCancelled
     | SyncEventSessionNextContextUpdated
     | SyncEventSessionNextSynthetic
     | SyncEventSessionNextShellStarted
@@ -2012,6 +2042,14 @@ export type Config = {
     prune?: boolean
     tail_turns?: number
     preserve_recent_tokens?: number
+    /**
+     * Fraction of usable context that triggers automatic compaction (default: 0.7)
+     */
+    threshold?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    /**
+     * Fraction of usable context to retain verbatim after proactive compaction (default: 0.45)
+     */
+    target?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
     reserved?: number
   }
   experimental?: {
@@ -2738,6 +2776,7 @@ export type SessionDurableEvent =
   | SessionNextMoved
   | SessionNextPrompted
   | SessionNextPromptAdmitted
+  | SessionNextPromptCancelled
   | SessionNextContextUpdated
   | SessionNextSynthetic
   | SessionNextShellStarted
@@ -2768,6 +2807,12 @@ export type SessionHistory = {
 }
 
 export type SessionDurableEventStream = string
+
+export type DiveInNotFoundError = {
+  _tag: "DiveInNotFoundError"
+  diveInID: string
+  message: string
+}
 
 export type SessionMessagesResponse = {
   data: Array<SessionMessage>
@@ -2865,6 +2910,7 @@ export type V2Event =
   | SessionNextMoved
   | SessionNextPrompted
   | SessionNextPromptAdmitted
+  | SessionNextPromptCancelled
   | SessionNextContextUpdated
   | SessionNextSynthetic
   | SessionNextShellStarted
@@ -2911,6 +2957,8 @@ export type V2Event =
   | QuestionV2Asked
   | QuestionV2Replied
   | QuestionV2Rejected
+  | DiveinUpdated
+  | DiveinDeleted
   | TodoUpdated
   | LspUpdated
   | PermissionAsked
@@ -3377,6 +3425,22 @@ export type SyncEventSessionNextPromptAdmitted = {
       messageID: string
       prompt: Prompt
       delivery: "steer" | "queue"
+    }
+  }
+}
+
+export type SyncEventSessionNextPromptCancelled = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.prompt.cancelled.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageID: string
     }
   }
 }
@@ -4260,6 +4324,25 @@ export type SessionNextPromptAdmitted = {
   }
 }
 
+export type SessionNextPromptCancelled = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.prompt.cancelled"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+  }
+}
+
 export type SessionNextContextUpdated = {
   id: string
   metadata?: {
@@ -4764,6 +4847,39 @@ export type SessionNextRevertCommitted = {
     timestamp: number
     sessionID: string
     messageID: string
+  }
+}
+
+export type DiveInTrack = {
+  id: string
+  sessionID: string
+  position: number
+  title: string
+  summary: string
+  reasoning: string
+  prompt: string
+  status: "active" | "completed" | "closed"
+  satisfied?: boolean
+  conclusion?: string
+  handoff?: string
+  time: {
+    created: number
+    updated: number
+    completed?: number
+  }
+}
+
+export type DiveInInfo = {
+  id: string
+  sessionID: string
+  title: string
+  guidance?: string
+  status: "active" | "completed" | "closed"
+  tracks: Array<DiveInTrack>
+  time: {
+    created: number
+    updated: number
+    completed?: number
   }
 }
 
@@ -5654,6 +5770,43 @@ export type QuestionV2Rejected = {
   }
 }
 
+export type DiveinUpdated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "divein.updated"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    diveInID: string
+    sessionID: string
+    status: "active" | "completed" | "closed"
+  }
+}
+
+export type DiveinDeleted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "divein.deleted"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    diveInID: string
+    sessionID: string
+  }
+}
+
 export type TodoUpdated = {
   id: string
   metadata?: {
@@ -6301,6 +6454,16 @@ export type EventSessionNextPromptAdmitted = {
   }
 }
 
+export type EventSessionNextPromptCancelled = {
+  id: string
+  type: "session.next.prompt.cancelled"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+  }
+}
+
 export type EventSessionNextContextUpdated = {
   id: string
   type: "session.next.context.updated"
@@ -6832,6 +6995,25 @@ export type EventQuestionV2Rejected = {
   properties: {
     sessionID: string
     requestID: string
+  }
+}
+
+export type EventDiveinUpdated = {
+  id: string
+  type: "divein.updated"
+  properties: {
+    diveInID: string
+    sessionID: string
+    status: "active" | "completed" | "closed"
+  }
+}
+
+export type EventDiveinDeleted = {
+  id: string
+  type: "divein.deleted"
+  properties: {
+    diveInID: string
+    sessionID: string
   }
 }
 
@@ -11369,6 +11551,8 @@ export type V2SessionListResponse = V2SessionListResponses[keyof V2SessionListRe
 export type V2SessionCreateData = {
   body: {
     id?: string
+    parentID?: string
+    title?: string
     agent?: string
     model?: ModelRef
     location?: LocationRef
@@ -11980,6 +12164,240 @@ export type V2SessionMessageResponses = {
 }
 
 export type V2SessionMessageResponse = V2SessionMessageResponses[keyof V2SessionMessageResponses]
+
+export type V2DiveInListData = {
+  body?: never
+  path?: never
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/divein"
+}
+
+export type V2DiveInListErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2DiveInListError = V2DiveInListErrors[keyof V2DiveInListErrors]
+
+export type V2DiveInListResponses = {
+  /**
+   * Success
+   */
+  200: Array<DiveInInfo>
+}
+
+export type V2DiveInListResponse = V2DiveInListResponses[keyof V2DiveInListResponses]
+
+export type V2DiveInGetData = {
+  body?: never
+  path: {
+    diveInID: string
+  }
+  query?: never
+  url: "/api/divein/{diveInID}"
+}
+
+export type V2DiveInGetErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * DiveInNotFoundError
+   */
+  404: DiveInNotFoundError
+}
+
+export type V2DiveInGetError = V2DiveInGetErrors[keyof V2DiveInGetErrors]
+
+export type V2DiveInGetResponses = {
+  /**
+   * DiveIn.Info
+   */
+  200: DiveInInfo
+}
+
+export type V2DiveInGetResponse = V2DiveInGetResponses[keyof V2DiveInGetResponses]
+
+export type V2DiveInStartData = {
+  body: {
+    guidance?: string
+  }
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/divein"
+}
+
+export type V2DiveInStartErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
+}
+
+export type V2DiveInStartError = V2DiveInStartErrors[keyof V2DiveInStartErrors]
+
+export type V2DiveInStartResponses = {
+  /**
+   * DiveIn.Info
+   */
+  200: DiveInInfo
+}
+
+export type V2DiveInStartResponse = V2DiveInStartResponses[keyof V2DiveInStartResponses]
+
+export type V2DiveInCancelData = {
+  body?: never
+  path: {
+    sessionID: string
+    diveInID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/divein/{diveInID}/cancel"
+}
+
+export type V2DiveInCancelErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError | DiveInNotFoundError
+   */
+  404: DiveInNotFoundError | SessionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
+}
+
+export type V2DiveInCancelError = V2DiveInCancelErrors[keyof V2DiveInCancelErrors]
+
+export type V2DiveInCancelResponses = {
+  /**
+   * <No Content>
+   */
+  204: void
+}
+
+export type V2DiveInCancelResponse = V2DiveInCancelResponses[keyof V2DiveInCancelResponses]
+
+export type V2DiveInCompleteData = {
+  body: {
+    satisfied: boolean
+  }
+  path: {
+    sessionID: string
+    diveInID: string
+    trackID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/divein/{diveInID}/track/{trackID}/complete"
+}
+
+export type V2DiveInCompleteErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError | DiveInNotFoundError
+   */
+  404: DiveInNotFoundError | SessionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
+}
+
+export type V2DiveInCompleteError = V2DiveInCompleteErrors[keyof V2DiveInCompleteErrors]
+
+export type V2DiveInCompleteResponses = {
+  /**
+   * DiveIn.Info
+   */
+  200: DiveInInfo
+}
+
+export type V2DiveInCompleteResponse = V2DiveInCompleteResponses[keyof V2DiveInCompleteResponses]
+
+export type V2DiveInReopenData = {
+  body?: never
+  path: {
+    sessionID: string
+    diveInID: string
+    trackID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/divein/{diveInID}/track/{trackID}/reopen"
+}
+
+export type V2DiveInReopenErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError | DiveInNotFoundError
+   */
+  404: DiveInNotFoundError | SessionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
+}
+
+export type V2DiveInReopenError = V2DiveInReopenErrors[keyof V2DiveInReopenErrors]
+
+export type V2DiveInReopenResponses = {
+  /**
+   * DiveIn.Info
+   */
+  200: DiveInInfo
+}
+
+export type V2DiveInReopenResponse = V2DiveInReopenResponses[keyof V2DiveInReopenResponses]
 
 export type V2SessionMessagesData = {
   body?: never

@@ -61,6 +61,15 @@ export class SessionNotFoundError extends Schema.TaggedErrorClass<SessionNotFoun
   { httpApiStatus: 404 },
 ) {}
 
+export class DiveInNotFoundError extends Schema.TaggedErrorClass<DiveInNotFoundError>()(
+  "DiveInNotFoundError",
+  {
+    diveInID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
 export class MessageNotFoundError extends Schema.TaggedErrorClass<MessageNotFoundError>()(
   "MessageNotFoundError",
   {

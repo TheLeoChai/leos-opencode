@@ -161,6 +161,7 @@ export function Prompt(props: PromptProps) {
   const dialog = useDialog()
   const toast = useToast()
   const status = createMemo(() => sync.data.session_status?.[props.sessionID ?? ""] ?? { type: "idle" })
+  const childSession = createMemo(() => !!props.sessionID && !!sync.session.get(props.sessionID)?.parentID)
   const history = usePromptHistory()
   const stash = usePromptStash()
   const keymap = useOpencodeKeymap()
@@ -889,6 +890,32 @@ export function Prompt(props: PromptProps) {
       bindings: tuiConfig.keybinds.get("prompt.history.previous"),
     }
   })
+
+  useBindings(() => ({
+    target: inputTarget,
+    enabled: (() => {
+      cursorVersion()
+      return (
+        childSession() &&
+        inputTarget() !== undefined &&
+        store.mode === "normal" &&
+        !auto()?.visible &&
+        input !== undefined &&
+        store.prompt.input.length === 0 &&
+        input.cursorOffset === 0
+      )
+    })(),
+    bindings: [
+      {
+        key: "up",
+        desc: "Go to parent session",
+        group: "Session",
+        cmd: () => {
+          keymap.dispatchCommand("session.parent")
+        },
+      },
+    ],
+  }))
 
   useBindings(() => {
     return {

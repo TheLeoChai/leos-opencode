@@ -40,5 +40,10 @@ export const migrations = (
     import("./migration/20260622142730_simplify_session_context_epoch"),
     import("./migration/20260622170816_reset_v2_session_state"),
     import("./migration/20260622202450_simplify_session_input"),
+    import("./migration/20260807002941_dive-in"),
+    import("./migration/20260807012804_dive-in-active-session"),
+    import("./migration/20260812041453_dive-in-handoff"),
+    import("./migration/20260812073159_common_jasper_sitwell"),
+    import("./migration/20260812083220_nostalgic_millenium_guard"),
   ])
 ).map((module) => module.default) satisfies DatabaseMigration.Migration[]

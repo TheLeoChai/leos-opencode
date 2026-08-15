@@ -11,7 +11,7 @@
     <img alt="MIT License" src="https://img.shields.io/badge/license-MIT-111827?style=for-the-badge">
   </a>
   <a href="https://github.com/TheLeoChai/leos-opencode/commits/leos-opencode">
-    <img alt="Upstream tracked" src="https://img.shields.io/badge/branch-upstream--tracked-0f766e?style=for-the-badge">
+    <img alt="Canonical branch" src="https://img.shields.io/badge/branch-leos--opencode-0f766e?style=for-the-badge">
   </a>
 </p>
 
@@ -25,16 +25,16 @@
 > [!IMPORTANT]
 > Leo's OpenCode is an independent personal fork. It is not created,
 > maintained, endorsed, sponsored, or affiliated with anomalyco or the
-> official OpenCode team. Use the upstream project for official releases,
+> official OpenCode team. Use the official project for official releases,
 > support, security notices, and community documentation.
 
 ## Why This Fork Exists
 
 OpenCode is already an excellent terminal coding agent. This project is a
-small, upstream-tracking playground for improvements that make long-running
+small, official-source-tracking playground for improvements that make long-running
 sessions easier to monitor and less likely to hit a hard context boundary.
 
-The goal is not to replace upstream OpenCode. The goal is to keep a focused,
+The goal is not to replace official OpenCode. The goal is to keep a focused,
 reviewable personal layer on top of it.
 
 ## What Changed
@@ -43,7 +43,7 @@ reviewable personal layer on top of it.
   <tr>
     <td width="33%"><strong>More context headroom</strong><br><sub>Proactive compaction begins before the model reaches the hard context limit.</sub></td>
     <td width="33%"><strong>Visible session navigation</strong><br><sub>The conversation scrollbar is enabled by default and remains toggleable.</sub></td>
-    <td width="33%"><strong>Upstream-first maintenance</strong><br><sub>Fork changes stay in a small branch that can be rebased onto upstream <code>dev</code>.</sub></td>
+    <td width="33%"><strong>Official-source maintenance</strong><br><sub>Fork changes stay on <code>leos-opencode</code> and can be rebased onto official <code>origin/dev</code>.</sub></td>
   </tr>
 </table>
 
@@ -105,14 +105,11 @@ directory depends on the operating system and architecture.
 
 ## Staying Current
 
-Keep the official repository separate from the personal fork:
+Keep the official repository as `origin` and the personal fork as `leo`:
 
-```bash
-git remote add upstream https://github.com/anomalyco/opencode.git
-git fetch upstream dev
-git rebase upstream/dev
-bun install
-bun run --cwd packages/opencode build --single
+```powershell
+git remote -v
+.\update-fork.ps1
 ```
 
 Resolve fork conflicts deliberately, especially in the session compaction
@@ -122,7 +119,7 @@ implementation and the terminal session route. The detailed workflow lives in
 ## Project Status
 
 This is a personal side project. APIs, defaults, and build instructions may
-change as upstream OpenCode evolves. Treat it as an experimental source fork,
+change as official OpenCode evolves. Treat it as an experimental source fork,
 not as a drop-in replacement for the official distribution.
 
 ## Credits And License

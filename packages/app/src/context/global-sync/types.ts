@@ -14,6 +14,7 @@ import type {
   Session,
   SessionStatus,
   SnapshotFileDiff,
+  DiveInInfo,
   Todo,
   VcsInfo,
 } from "@opencode-ai/sdk/v2/client"
@@ -45,6 +46,7 @@ export type State = {
   config: Config
   path: Path
   session: Session[]
+  dive_in?: DiveInInfo[]
   sessionTotal: number
   session_status: {
     [sessionID: string]: SessionStatus

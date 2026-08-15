@@ -66,6 +66,14 @@ export type UnknownError = {
 export const isUnknownError = (value: unknown): value is UnknownError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "UnknownError"
 
+export type DiveInNotFoundError = {
+  readonly _tag: "DiveInNotFoundError"
+  readonly diveInID: string
+  readonly message: string
+}
+export const isDiveInNotFoundError = (value: unknown): value is DiveInNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "DiveInNotFoundError"
+
 export type ProviderNotFoundError = {
   readonly _tag: "ProviderNotFoundError"
   readonly providerID: string
@@ -269,24 +277,48 @@ export type SessionsListOutput = {
 export type SessionsCreateInput = {
   readonly id?: {
     readonly id?: string | null
+    readonly parentID?: string | null
+    readonly title?: string | null
     readonly agent?: string | null
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string; readonly workspaceID?: string } | null
   }["id"]
+  readonly parentID?: {
+    readonly id?: string | null
+    readonly parentID?: string | null
+    readonly title?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly location?: { readonly directory: string; readonly workspaceID?: string } | null
+  }["parentID"]
+  readonly title?: {
+    readonly id?: string | null
+    readonly parentID?: string | null
+    readonly title?: string | null
+    readonly agent?: string | null
+    readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
+    readonly location?: { readonly directory: string; readonly workspaceID?: string } | null
+  }["title"]
   readonly agent?: {
     readonly id?: string | null
+    readonly parentID?: string | null
+    readonly title?: string | null
     readonly agent?: string | null
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string; readonly workspaceID?: string } | null
   }["agent"]
   readonly model?: {
     readonly id?: string | null
+    readonly parentID?: string | null
+    readonly title?: string | null
     readonly agent?: string | null
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string; readonly workspaceID?: string } | null
   }["model"]
   readonly location?: {
     readonly id?: string | null
+    readonly parentID?: string | null
+    readonly title?: string | null
     readonly agent?: string | null
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string } | null
     readonly location?: { readonly directory: string; readonly workspaceID?: string } | null
@@ -780,6 +812,14 @@ export type SessionsHistoryOutput = {
     | {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "session.next.prompt.cancelled"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: { readonly timestamp: number; readonly sessionID: string; readonly messageID: string }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.context.updated"
         readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1234,6 +1274,14 @@ export type SessionsEventsOutput =
         }
         readonly delivery: "steer" | "queue"
       }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "session.next.prompt.cancelled"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: { readonly timestamp: number; readonly sessionID: string; readonly messageID: string }
     }
   | {
       readonly id: string
@@ -1752,6 +1800,154 @@ export type SessionsMessageOutput = {
         readonly time: { readonly created: number }
       }
 }["data"]
+
+export type DiveInListInput = {
+  readonly location?: {
+    readonly location?: { readonly directory?: string | undefined; readonly workspace?: string | undefined } | undefined
+  }["location"]
+}
+
+export type DiveInListOutput = ReadonlyArray<{
+  readonly id: string
+  readonly sessionID: string
+  readonly title: string
+  readonly guidance?: string
+  readonly status: "active" | "completed" | "closed"
+  readonly tracks: ReadonlyArray<{
+    readonly id: string
+    readonly sessionID: string
+    readonly position: number
+    readonly title: string
+    readonly summary: string
+    readonly reasoning: string
+    readonly prompt: string
+    readonly status: "active" | "completed" | "closed"
+    readonly satisfied?: boolean
+    readonly conclusion?: string
+    readonly handoff?: string
+    readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+  }>
+  readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+}>
+
+export type DiveInGetInput = { readonly diveInID: { readonly diveInID: string }["diveInID"] }
+
+export type DiveInGetOutput = {
+  readonly id: string
+  readonly sessionID: string
+  readonly title: string
+  readonly guidance?: string
+  readonly status: "active" | "completed" | "closed"
+  readonly tracks: ReadonlyArray<{
+    readonly id: string
+    readonly sessionID: string
+    readonly position: number
+    readonly title: string
+    readonly summary: string
+    readonly reasoning: string
+    readonly prompt: string
+    readonly status: "active" | "completed" | "closed"
+    readonly satisfied?: boolean
+    readonly conclusion?: string
+    readonly handoff?: string
+    readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+  }>
+  readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+}
+
+export type DiveInStartInput = {
+  readonly sessionID: { readonly sessionID: string }["sessionID"]
+  readonly guidance?: { readonly guidance?: string | undefined }["guidance"]
+}
+
+export type DiveInStartOutput = {
+  readonly id: string
+  readonly sessionID: string
+  readonly title: string
+  readonly guidance?: string
+  readonly status: "active" | "completed" | "closed"
+  readonly tracks: ReadonlyArray<{
+    readonly id: string
+    readonly sessionID: string
+    readonly position: number
+    readonly title: string
+    readonly summary: string
+    readonly reasoning: string
+    readonly prompt: string
+    readonly status: "active" | "completed" | "closed"
+    readonly satisfied?: boolean
+    readonly conclusion?: string
+    readonly handoff?: string
+    readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+  }>
+  readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+}
+
+export type DiveInCancelInput = {
+  readonly sessionID: { readonly sessionID: string; readonly diveInID: string }["sessionID"]
+  readonly diveInID: { readonly sessionID: string; readonly diveInID: string }["diveInID"]
+}
+
+export type DiveInCancelOutput = void
+
+export type DiveInCompleteInput = {
+  readonly sessionID: { readonly sessionID: string; readonly diveInID: string; readonly trackID: string }["sessionID"]
+  readonly diveInID: { readonly sessionID: string; readonly diveInID: string; readonly trackID: string }["diveInID"]
+  readonly trackID: { readonly sessionID: string; readonly diveInID: string; readonly trackID: string }["trackID"]
+  readonly satisfied: { readonly satisfied: boolean }["satisfied"]
+}
+
+export type DiveInCompleteOutput = {
+  readonly id: string
+  readonly sessionID: string
+  readonly title: string
+  readonly guidance?: string
+  readonly status: "active" | "completed" | "closed"
+  readonly tracks: ReadonlyArray<{
+    readonly id: string
+    readonly sessionID: string
+    readonly position: number
+    readonly title: string
+    readonly summary: string
+    readonly reasoning: string
+    readonly prompt: string
+    readonly status: "active" | "completed" | "closed"
+    readonly satisfied?: boolean
+    readonly conclusion?: string
+    readonly handoff?: string
+    readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+  }>
+  readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+}
+
+export type DiveInReopenInput = {
+  readonly sessionID: { readonly sessionID: string; readonly diveInID: string; readonly trackID: string }["sessionID"]
+  readonly diveInID: { readonly sessionID: string; readonly diveInID: string; readonly trackID: string }["diveInID"]
+  readonly trackID: { readonly sessionID: string; readonly diveInID: string; readonly trackID: string }["trackID"]
+}
+
+export type DiveInReopenOutput = {
+  readonly id: string
+  readonly sessionID: string
+  readonly title: string
+  readonly guidance?: string
+  readonly status: "active" | "completed" | "closed"
+  readonly tracks: ReadonlyArray<{
+    readonly id: string
+    readonly sessionID: string
+    readonly position: number
+    readonly title: string
+    readonly summary: string
+    readonly reasoning: string
+    readonly prompt: string
+    readonly status: "active" | "completed" | "closed"
+    readonly satisfied?: boolean
+    readonly conclusion?: string
+    readonly handoff?: string
+    readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+  }>
+  readonly time: { readonly created: number; readonly updated: number; readonly completed?: number }
+}
 
 export type MessagesListInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]

@@ -271,6 +271,18 @@ import type {
   V2CredentialRemoveResponses,
   V2CredentialUpdateErrors,
   V2CredentialUpdateResponses,
+  V2DiveInCancelErrors,
+  V2DiveInCancelResponses,
+  V2DiveInCompleteErrors,
+  V2DiveInCompleteResponses,
+  V2DiveInGetErrors,
+  V2DiveInGetResponses,
+  V2DiveInListErrors,
+  V2DiveInListResponses,
+  V2DiveInReopenErrors,
+  V2DiveInReopenResponses,
+  V2DiveInStartErrors,
+  V2DiveInStartResponses,
   V2EventSubscribeErrors,
   V2EventSubscribeResponses,
   V2FsFindErrors,
@@ -5474,6 +5486,8 @@ export class Session3 extends HeyApiClient {
   public create<ThrowOnError extends boolean = false>(
     parameters?: {
       id?: string
+      parentID?: string
+      title?: string
       agent?: string
       model?: ModelRef
       location?: LocationRef
@@ -5486,6 +5500,8 @@ export class Session3 extends HeyApiClient {
         {
           args: [
             { in: "body", key: "id" },
+            { in: "body", key: "parentID" },
+            { in: "body", key: "title" },
             { in: "body", key: "agent" },
             { in: "body", key: "model" },
             { in: "body", key: "location" },
@@ -5870,6 +5886,185 @@ export class Session3 extends HeyApiClient {
   private _question?: Question2
   get question(): Question2 {
     return (this._question ??= new Question2({ client: this.client }))
+  }
+}
+
+export class DiveIn extends HeyApiClient {
+  /**
+   * List DiveIn groups
+   *
+   * List persisted DiveIn groups for a location.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters?: {
+      location?: {
+        directory?: string
+        workspace?: string
+      }
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "location" }] }])
+    return (options?.client ?? this.client).get<V2DiveInListResponses, V2DiveInListErrors, ThrowOnError>({
+      url: "/api/divein",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get a DiveIn group
+   *
+   * Get one persisted DiveIn group and its tracks.
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters: {
+      diveInID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "diveInID" }] }])
+    return (options?.client ?? this.client).get<V2DiveInGetResponses, V2DiveInGetErrors, ThrowOnError>({
+      url: "/api/divein/{diveInID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Start a DiveIn
+   *
+   * Plan independent side tracks for a session and start them concurrently.
+   */
+  public start<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      guidance?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "body", key: "guidance" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<V2DiveInStartResponses, V2DiveInStartErrors, ThrowOnError>({
+      url: "/api/session/{sessionID}/divein",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Cancel a DiveIn
+   *
+   * Remove the current DiveIn tracks while preserving the main session.
+   */
+  public cancel<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      diveInID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "diveInID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<V2DiveInCancelResponses, V2DiveInCancelErrors, ThrowOnError>({
+      url: "/api/session/{sessionID}/divein/{diveInID}/cancel",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Complete a DiveIn track
+   *
+   * Confirm a track conclusion and synthesize all completed tracks into the main session.
+   */
+  public complete<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      diveInID: string
+      trackID: string
+      satisfied?: boolean
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "diveInID" },
+            { in: "path", key: "trackID" },
+            { in: "body", key: "satisfied" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<V2DiveInCompleteResponses, V2DiveInCompleteErrors, ThrowOnError>({
+      url: "/api/session/{sessionID}/divein/{diveInID}/track/{trackID}/complete",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Reopen a DiveIn track
+   *
+   * Undo a completed track before its handoff reaches the main session.
+   */
+  public reopen<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      diveInID: string
+      trackID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "diveInID" },
+            { in: "path", key: "trackID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<V2DiveInReopenResponses, V2DiveInReopenErrors, ThrowOnError>({
+      url: "/api/session/{sessionID}/divein/{diveInID}/track/{trackID}/reopen",
+      ...options,
+      ...params,
+    })
   }
 }
 
@@ -7006,6 +7201,11 @@ export class V2 extends HeyApiClient {
   private _session?: Session3
   get session(): Session3 {
     return (this._session ??= new Session3({ client: this.client }))
+  }
+
+  private _diveIn?: DiveIn
+  get diveIn(): DiveIn {
+    return (this._diveIn ??= new DiveIn({ client: this.client }))
   }
 
   private _model?: Model

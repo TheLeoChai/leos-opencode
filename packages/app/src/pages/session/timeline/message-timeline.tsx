@@ -298,6 +298,21 @@ export function MessageTimeline(props: {
     if (!id) return
     return sync().session.get(id)
   })
+  const diveInTrack = createMemo(() => {
+    const id = sessionID()
+    return id
+      ? (sync().data.dive_in ?? []).flatMap((group) => group.tracks).find((track) => track.sessionID === id)
+      : undefined
+  })
+  const initialPrompt = createMemo(() => {
+    const track = diveInTrack()
+    if (!track) return undefined
+    const message = sessionMessages().find((item): item is UserMessage => item.role === "user")
+    const text = message
+      ? (sync().data.part[message.id] ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("")
+      : ""
+    return text === track.prompt ? undefined : track.prompt
+  })
   const parentMessages = createMemo(() => {
     const id = parentID()
     if (!id) return emptyMessages
@@ -1825,6 +1840,22 @@ export function MessageTimeline(props: {
                 )}
               </Show>
             </div>
+            <Show when={initialPrompt()}>
+              {(prompt) => (
+                <div
+                  data-slot="divein-initial-prompt"
+                  class="mb-2 rounded-md border border-border-weak-base bg-background-base/50 px-3 py-2"
+                >
+                  <div class="text-11-medium text-text-weak">{language.t("divein.initialPrompt")}</div>
+                  <div
+                    dir="auto"
+                    class="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap text-12-regular text-text-base"
+                  >
+                    {prompt()}
+                  </div>
+                </div>
+              )}
+            </Show>
           </div>
         </Show>
         <div

@@ -12,6 +12,8 @@ const dir = path.resolve(__dirname, "..")
 
 process.chdir(dir)
 
+const buildDir = path.resolve(process.env.OPENCODE_BUILD_DIR || "dist")
+
 const generated = await import("./generate.ts")
 
 import { Script } from "@opencode-ai/script"
@@ -134,7 +136,7 @@ const targets = singleFlag
     })
   : allTargets
 
-await $`rm -rf dist`
+fs.rmSync(buildDir, { recursive: true, force: true })
 
 const binaries: Record<string, string> = {}
 if (!skipInstall) {
@@ -154,7 +156,7 @@ for (const item of targets) {
     .filter(Boolean)
     .join("-")
   console.log(`building ${name}`)
-  await $`mkdir -p dist/${name}/bin`
+  fs.mkdirSync(path.join(buildDir, name, "bin"), { recursive: true })
 
   const localPath = path.resolve(dir, "node_modules/@opentui/core/parser.worker.js")
   const rootPath = path.resolve(dir, "../../node_modules/@opentui/core/parser.worker.js")
@@ -180,7 +182,7 @@ for (const item of targets) {
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/opencode`,
+      outfile: path.join(buildDir, name, "bin", "opencode"),
       execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
@@ -200,7 +202,7 @@ for (const item of targets) {
 
   // Smoke test: only run if binary is for current platform
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
-    const binaryPath = `dist/${name}/bin/opencode`
+    const binaryPath = path.join(buildDir, name, "bin", "opencode")
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
       const versionOutput = await $`${binaryPath} --version`.text()
@@ -211,8 +213,11 @@ for (const item of targets) {
     }
   }
 
-  await $`rm -rf ./dist/${name}/bin/tui`
-  await Bun.file(`dist/${name}/package.json`).write(
+  fs.rmSync(path.join(buildDir, name, "bin", "tui"), {
+    recursive: true,
+    force: true,
+  })
+  await Bun.file(path.join(buildDir, name, "package.json")).write(
     JSON.stringify(
       {
         name,
@@ -232,12 +237,16 @@ for (const item of targets) {
 if (Script.release) {
   for (const key of Object.keys(binaries)) {
     if (key.includes("linux")) {
-      await $`tar -czf ../../${key}.tar.gz *`.cwd(`dist/${key}/bin`)
+      const archivePath = path.join(buildDir, `${key}.tar.gz`)
+      await $`tar -czf ${archivePath} *`.cwd(path.join(buildDir, key, "bin"))
     } else {
-      await $`zip -r ../../${key}.zip *`.cwd(`dist/${key}/bin`)
+      const archivePath = path.join(buildDir, `${key}.zip`)
+      await $`zip -r ${archivePath} *`.cwd(path.join(buildDir, key, "bin"))
     }
   }
-  await $`gh release upload v${Script.version} ./dist/*.zip ./dist/*.tar.gz --clobber --repo ${process.env.GH_REPO}`
+  const zipArchives = path.join(buildDir, "*.zip")
+  const tarArchives = path.join(buildDir, "*.tar.gz")
+  await $`gh release upload v${Script.version} ${zipArchives} ${tarArchives} --clobber --repo ${process.env.GH_REPO}`
 }
 
 export { binaries }

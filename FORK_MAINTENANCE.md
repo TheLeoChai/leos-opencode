@@ -5,72 +5,75 @@ changes remain easy to rebase.
 
 ## Remote Layout
 
-Use the personal repository as `origin` and the official repository as
-`upstream`:
+The canonical branch is `leos-opencode`. The remotes have fixed roles:
+
+| Remote | Role | URL |
+| --- | --- | --- |
+| `origin` | Official OpenCode source | `https://github.com/anomalyco/opencode.git` |
+| `leo` | Personal fork | `git@github.com:TheLeoChai/leos-opencode.git` |
+
+Verify the layout before maintenance:
 
 ```powershell
-git remote rename origin upstream
-git remote add origin git@github.com:TheLeoChai/leos-opencode.git
 git remote -v
+git branch --show-current
 ```
 
-The customization branch is `leos-opencode`. The official base branch is
-`upstream/dev`.
+Do not rename these remotes or add a tag-based source workflow.
 
-## Updating The Fork
+## Canonical Update
 
-Do not rebase with a dirty worktree. Commit or stash local work first, then:
+Run the root updater while already on `leos-opencode`:
 
 ```powershell
-git fetch upstream --prune
-git switch leos-opencode
-git rebase upstream/dev
-bun install
-bun run --cwd packages/opencode build --single
+.\update-fork.ps1
 ```
 
-Run the focused compaction tests after resolving any conflicts:
+The updater refuses an existing rebase, merge, or cherry-pick and refuses any
+other branch. It creates a timestamped backup ref, then stashes tracked and
+untracked work while recording the stash object. It fetches `origin/dev` and
+rebases only `leos-opencode` onto `origin/dev`.
+
+If the rebase conflicts, the updater stops immediately. It does not restore
+the stash or build while the rebase is unresolved. Resolve and continue the
+rebase deliberately, then inspect the recorded stash before restoring it.
+
+After a successful rebase, the updater restores the recorded work with
+`git stash apply --index`. The stash is retained, including when restoration
+conflicts. A build starts only after restoration succeeds.
+
+Inspect the resulting history and worktree before publishing:
 
 ```powershell
-cd packages/opencode
-bun test test/session/compaction.test.ts
-```
-
-If a rebase conflicts, resolve the files, stage them, and continue:
-
-```powershell
-git add <resolved-files>
-git rebase --continue
-```
-
-Use `git rebase --abort` only when abandoning the update. Inspect the diff
-before pushing the rebased branch:
-
-```powershell
-git diff upstream/dev...HEAD
+git diff origin/dev...HEAD
 git status
 ```
 
-## Publishing Updates
+## Staged Builds
 
-The branch is intentionally kept separate from `dev`, so upstream's branch
-can remain a clean reference point. A rebase changes commit IDs; update the
-personal remote with the safer force option:
+The Windows rebuild helper never stops or waits for existing OpenCode
+processes. Each build is written to a new immutable directory below
+`dist\updates\<timestamp>`. The staged Windows binary is version-checked, then
+the helper atomically replaces the ignored `bin\current.txt` pointer.
 
 ```powershell
-git push --force-with-lease origin leos-opencode
+.\rebuild-opencode.ps1
+.\bin\opencode.cmd --version
 ```
 
-## Windows Helpers
+The launcher fails if `bin\current.txt` is missing, empty, or points to a
+missing/non-file target. It invokes only the resolved pointer target. Normal
+builds without `OPENCODE_BUILD_DIR` continue to use
+`packages\opencode\dist`.
 
-The root `rebuild-opencode.cmd` and `rebuild-opencode.ps1` scripts build the
-current checkout's Windows binary without assuming a particular machine path.
-They refuse to replace a binary that is still running.
+## Publishing Updates
 
-The optional root `update-fork.ps1` helper is intended for a compiled Windows
-fork. It waits for the current process to exit, stashes local changes,
-rebases onto `upstream/dev`, rebuilds, and restores the changes. Review its
-output before accepting a rebase or resolving conflicts.
+The personal remote is `leo`, so publish the rebased canonical branch there
+with the safer force option only after reviewing the diff:
+
+```powershell
+git push --force-with-lease leo leos-opencode
+```
 
 ## What Does Not Belong In The Repository
 

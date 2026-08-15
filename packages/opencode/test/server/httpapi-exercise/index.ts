@@ -964,6 +964,57 @@ const scenarios: Scenario[] = [
       headers: ctx.headers(),
     }))
     .status(400, undefined, "none"),
+  http.protected.get("/api/divein", "v2.diveIn.list").json(200, array, "status"),
+  http.protected
+    .get("/api/divein/{diveInID}", "v2.diveIn.get")
+    .at((ctx) => ({
+      path: route("/api/divein/{diveInID}", { diveInID: "dive_httpapi_missing" }),
+      headers: ctx.headers(),
+    }))
+    .status(404, undefined, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/divein", "v2.diveIn.start")
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/divein", { sessionID: "ses_httpapi_missing" }),
+      headers: { ...ctx.headers(), "content-type": "application/json" },
+      body: {},
+    }))
+    .status(404, undefined, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/divein/{diveInID}/cancel", "v2.diveIn.cancel")
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/divein/{diveInID}/cancel", {
+        sessionID: "ses_httpapi_missing",
+        diveInID: "dive_httpapi_missing",
+      }),
+      headers: { ...ctx.headers(), "content-type": "application/json" },
+      body: {},
+    }))
+    .status(404, undefined, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/divein/{diveInID}/track/{trackID}/complete", "v2.diveIn.complete")
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/divein/{diveInID}/track/{trackID}/complete", {
+        sessionID: "ses_httpapi_missing",
+        diveInID: "dive_httpapi_missing",
+        trackID: "dtrk_httpapi_missing",
+      }),
+      headers: { ...ctx.headers(), "content-type": "application/json" },
+      body: { satisfied: true },
+    }))
+    .status(404, undefined, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/divein/{diveInID}/track/{trackID}/reopen", "v2.diveIn.reopen")
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/divein/{diveInID}/track/{trackID}/reopen", {
+        sessionID: "ses_httpapi_missing",
+        diveInID: "dive_httpapi_missing",
+        trackID: "dtrk_httpapi_missing",
+      }),
+      headers: { ...ctx.headers(), "content-type": "application/json" },
+      body: {},
+    }))
+    .status(404, undefined, "status"),
   http.protected.get("/api/session/active", "v2.session.active").json(200, data(object), "none"),
   http.protected
     .post("/api/session", "v2.session.create")
