@@ -1,5 +1,7 @@
 import * as Effect from "effect/Effect"
 import * as Command from "effect/unstable/cli/Command"
+import { DiveIn } from "@opencode-ai/core/dive-in"
+import { SessionV2 } from "@opencode-ai/core/session"
 import { Spec } from "./spec"
 import { Daemon } from "../services/daemon"
 
@@ -10,11 +12,12 @@ export type Input<Value> =
       ? Input
       : never
 
-type RuntimeHandler = (input: unknown) => Effect.Effect<void, unknown, Daemon.Service>
+type RuntimeServices = Daemon.Service | DiveIn.Service | SessionV2.Service
+type RuntimeHandler = (input: unknown) => Effect.Effect<void, unknown, RuntimeServices>
 type Loader<Node extends Spec.Any> = () => Promise<{
-  default: (input: Input<Node>) => Effect.Effect<void, any, Daemon.Service>
+  default: (input: Input<Node>) => Effect.Effect<void, any, RuntimeServices>
 }>
-type ProvidedCommand = Command.Command<string, unknown, unknown, unknown, Daemon.Service>
+type ProvidedCommand = Command.Command<string, unknown, unknown, unknown, RuntimeServices>
 
 export type Handlers<Node extends Spec.Any> = keyof Node["commands"] extends never
   ? Loader<Node>
