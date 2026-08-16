@@ -11,6 +11,7 @@ $pointerTemp = Join-Path $bin ("current.txt.{0}.tmp" -f [Guid]::NewGuid().ToStri
 $pointerBackup = Join-Path $bin ("current.txt.{0}.bak" -f [Guid]::NewGuid().ToString("N"))
 $relativeTarget = Join-Path (Join-Path "dist\updates" $timestamp) "opencode-windows-x64\bin\opencode.exe"
 $previousBuildDir = $env:OPENCODE_BUILD_DIR
+$previousChannel = $env:OPENCODE_CHANNEL
 
 function Set-UserPathFirst([string]$entry) {
   $normalized = $entry.TrimEnd("\")
@@ -35,6 +36,7 @@ Set-UserPathFirst $bin
 
 try {
   $env:OPENCODE_BUILD_DIR = $staging
+  $env:OPENCODE_CHANNEL = "leos-opencode"
   Write-Host "Building OpenCode in $staging..."
   & bun run --cwd packages\opencode build --single --skip-install
   if ($LASTEXITCODE -ne 0) {
@@ -69,6 +71,12 @@ try {
     Remove-Item Env:OPENCODE_BUILD_DIR -ErrorAction SilentlyContinue
   } else {
     $env:OPENCODE_BUILD_DIR = $previousBuildDir
+  }
+
+  if ($null -eq $previousChannel) {
+    Remove-Item Env:OPENCODE_CHANNEL -ErrorAction SilentlyContinue
+  } else {
+    $env:OPENCODE_CHANNEL = $previousChannel
   }
 
   Remove-Item -LiteralPath $pointerTemp -Force -ErrorAction SilentlyContinue
