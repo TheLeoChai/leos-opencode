@@ -25,6 +25,7 @@ const sentShell: string[] = []
 const sentLegacyPrompts: Array<{ sessionID: string; messageID?: string }> = []
 const removedLegacyOptimistic: string[] = []
 const trackOptimisticEvents: string[] = []
+const sessionSyncs: string[] = []
 const sessionStatuses: string[] = []
 const toastDescriptions: string[] = []
 const syncedDirectories: string[] = []
@@ -214,6 +215,7 @@ beforeAll(async () => {
         },
       },
       session: {
+        get: () => undefined,
         optimistic: {
           add: (value: {
             directory?: string
@@ -230,6 +232,9 @@ beforeAll(async () => {
           remove: (value: { messageID: string }) => {
             removedLegacyOptimistic.push(value.messageID)
           },
+        },
+        sync: async (sessionID: string, options?: { force?: boolean }) => {
+          sessionSyncs.push(`${sessionID}:${options?.force === true}`)
         },
       },
       track: {
@@ -310,6 +315,7 @@ beforeEach(() => {
   sentLegacyPrompts.length = 0
   removedLegacyOptimistic.length = 0
   trackOptimisticEvents.length = 0
+  sessionSyncs.length = 0
   sessionStatuses.length = 0
   toastDescriptions.length = 0
   params = {}
@@ -591,6 +597,7 @@ describe("prompt submit worktree selection", () => {
     expect(sentV2Prompts[0]?.id).toMatch(/^msg_/)
     expect(removedLegacyOptimistic).toHaveLength(1)
     expect(trackOptimisticEvents).toEqual([expect.stringMatching(/^add:msg_/), "refresh"])
+    expect(sessionSyncs).toEqual(["session-1:true"])
     expect(sessionStatuses).toEqual(["busy", "idle"])
   })
 

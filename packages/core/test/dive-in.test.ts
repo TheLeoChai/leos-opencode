@@ -283,6 +283,38 @@ describe("DiveIn", () => {
         })
         .run()
 
+      const latestModel = {
+        id: ModelV2.ID.make("latest-model"),
+        providerID: ProviderV2.ID.make("latest-provider"),
+      }
+      const assistantID = SessionMessage.ID.create()
+      const assistant = Schema.encodeSync(SessionMessage.Message)(
+        SessionMessage.Assistant.make({
+          id: assistantID,
+          type: "assistant",
+          agent: "build",
+          model: latestModel,
+          content: [],
+          finish: "stop",
+          time: {
+            created: DateTime.makeUnsafe(Date.now() + 1),
+            completed: DateTime.makeUnsafe(Date.now() + 2),
+          },
+        }),
+      )
+      const { id: _assistantEncodedID, type: assistantType, ...assistantData } = assistant
+      yield* db
+        .insert(SessionMessageTable)
+        .values({
+          id: assistantID,
+          session_id: parent.id,
+          type: assistantType,
+          seq: 2,
+          time_created: Date.now() + 1,
+          data: assistantData,
+        })
+        .run()
+
       plannerResponses.splice(0, plannerResponses.length, plannerResponse(titles.slice(0, 6)), plannerResponse(titles))
       const diveIn = yield* DiveIn.Service
       const info = yield* diveIn.start({ sessionID: parent.id })
@@ -292,6 +324,9 @@ describe("DiveIn", () => {
       expect(
         yield* db.select({ id: DiveInTrackTable.id }).from(DiveInTrackTable).where(eq(DiveInTrackTable.dive_in_id, info.id)).all(),
       ).toHaveLength(titles.length)
+      const children = yield* Effect.forEach(info.tracks, (track) => sessions.get(track.sessionID))
+      expect(children.every((child) => child.model?.id === latestModel.id)).toBe(true)
+      expect(children.every((child) => child.model?.providerID === latestModel.providerID)).toBe(true)
       expect(plannerResponses).toHaveLength(0)
       expect((yield* sessions.get(parent.id)).id).toBe(parent.id)
     }),

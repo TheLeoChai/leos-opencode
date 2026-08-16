@@ -1049,17 +1049,17 @@ const layer = Layer.effect(
             const context = yield* sessions
               .context(input.sessionID)
               .pipe(Effect.mapError((error) => new PlanningError({ message: errorMessage(error) })))
+            const currentModel = [...context].reverse().find((message) => message.type === "assistant")?.model
+            const planningSession = currentModel ? { ...session, model: currentModel } : session
             const outline = numberedOutline(context)
             const preservedOutline = outline.length > 1 && outline.length <= MAX_TRACKS ? outline : undefined
             const plan = yield* Effect.gen(function* () {
               const models = yield* SessionRunnerModel.Service
-              const currentModel = [...context].reverse().find((message) => message.type === "assistant")?.model
-              const sessionModel = currentModel ? { ...session, model: currentModel } : session
-              const model = yield* models.resolve(sessionModel).pipe(
+              const model = yield* models.resolve(planningSession).pipe(
                 Effect.catchTag("SessionRunnerModel.VariantUnavailableError", () =>
                   models.resolve({
-                    ...sessionModel,
-                    model: sessionModel.model ? { ...sessionModel.model, variant: undefined } : undefined,
+                    ...planningSession,
+                    model: planningSession.model ? { ...planningSession.model, variant: undefined } : undefined,
                   }),
                 ),
               )
@@ -1160,7 +1160,7 @@ const layer = Layer.effect(
                   parentID: session.id,
                   title: normalize(track.title, "DiveIn track"),
                   agent: session.agent,
-                  model: session.model,
+                  model: planningSession.model,
                   location: session.location,
                 })
                 createdChildren.push(child.id)

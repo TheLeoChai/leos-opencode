@@ -14,7 +14,6 @@ import { useSync } from "@/context/sync"
 import { useServerSync } from "@/context/server-sync"
 import { useTerminal } from "@/context/terminal"
 import { showToast } from "@/utils/toast"
-import { findLast } from "@opencode-ai/core/util/array"
 import { createSessionTabs } from "@/pages/session/helpers"
 import { extractPromptFromParts } from "@/utils/prompt"
 import { UserMessage } from "@opencode-ai/sdk/v2"
@@ -102,7 +101,34 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
   const visibleUserMessages = () => {
     const revert = info()?.revert?.messageID
     if (!revert) return userMessages()
-    return userMessages().filter((m) => m.id < revert)
+    const boundary = userMessages().findIndex((message) => message.id === revert)
+    return boundary < 0 ? userMessages() : userMessages().slice(0, boundary)
+  }
+
+  const isDiveInTrack = (sessionID: string) =>
+    !!sync().data.dive_in?.some((group) => group.tracks.some((track) => track.sessionID === sessionID))
+
+  const stageRevert = (input: { sessionID: string; messageID: string }) => {
+    const client = sdk().client
+    if (!isDiveInTrack(input.sessionID) || !sync().track.isProjected(input.sessionID, input.messageID))
+      return client.session.revert(input)
+    return client.v2.session.revert.stage(input).then(async () => {
+      const result = await client.session.get({ sessionID: input.sessionID })
+      if (result.data) sync().session.remember(result.data)
+      return result
+    })
+  }
+
+  const clearRevert = (sessionID: string) => {
+    const client = sdk().client
+    const messageID = info()?.revert?.messageID
+    if (!isDiveInTrack(sessionID) || !messageID || !sync().track.isProjected(sessionID, messageID))
+      return client.session.unrevert({ sessionID })
+    return client.v2.session.revert.clear({ sessionID }).then(async () => {
+      const result = await client.session.get({ sessionID })
+      if (result.data) sync().session.remember(result.data)
+      return result
+    })
   }
 
   const showAllFiles = () => {
@@ -314,7 +340,9 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     const promptSession = prompt.capture()
     const revert = info()?.revert?.messageID
     const messages = userMessages()
-    const message = findLast(messages, (x) => !revert || x.id < revert)
+    const boundary = revert ? messages.findIndex((message) => message.id === revert) : messages.length
+    if (boundary < 0) return
+    const message = messages[boundary - 1]
     if (!message) return
     const parts = sync().data.part[message.id]
 
@@ -325,11 +353,11 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     await runCommand({
       owner,
       prompt: promptSession,
-      request: () => client.session.revert({ sessionID, messageID: message.id }),
+      request: () => stageRevert({ sessionID, messageID: message.id }),
       updatePrompt: (promptSession) => {
         if (parts) promptSession.set(extractPromptFromParts(parts, { directory }))
       },
-      updateViewport: () => setActiveMessage(findLast(messages, (x) => x.id < message.id)),
+      updateViewport: () => setActiveMessage(messages[boundary - 2]),
     })
   }
 
@@ -337,21 +365,22 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     const sessionID = params.id
     if (!sessionID) return
     const owner = sessionOwnership.capture()
-    const client = sdk().client
     const messages = userMessages()
     const promptSession = prompt.capture()
 
     const revertMessageID = info()?.revert?.messageID
     if (!revertMessageID) return
 
-    const next = messages.find((x) => x.id > revertMessageID)
+    const boundary = messages.findIndex((message) => message.id === revertMessageID)
+    if (boundary < 0) return
+    const next = messages[boundary + 1]
     if (!next) {
       await runCommand({
         owner,
         prompt: promptSession,
-        request: () => client.session.unrevert({ sessionID }),
+        request: () => clearRevert(sessionID),
         updatePrompt: (promptSession) => promptSession.reset(),
-        updateViewport: () => setActiveMessage(findLast(messages, (x) => x.id >= revertMessageID)),
+        updateViewport: () => setActiveMessage(messages.at(-1)),
       })
       return
     }
@@ -359,9 +388,9 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     await runCommand({
       owner,
       prompt: promptSession,
-      request: () => client.session.revert({ sessionID, messageID: next.id }),
+      request: () => stageRevert({ sessionID, messageID: next.id }),
       updatePrompt: () => undefined,
-      updateViewport: () => setActiveMessage(findLast(messages, (x) => x.id < next.id)),
+      updateViewport: () => setActiveMessage(messages[boundary]),
     })
   }
 

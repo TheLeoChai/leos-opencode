@@ -181,13 +181,27 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
     }
 
     if (isActiveTrackSession) {
-      await input.client.v2.session.prompt({
-        sessionID: input.draft.sessionID,
-        id: messageID,
-        prompt: toPromptInput(requestParts),
-        delivery: "steer",
-      })
+      const revert = input.sync.session.get(input.draft.sessionID)?.revert
+      const legacyRevert = revert && !input.sync.track.isProjected(input.draft.sessionID, revert.messageID)
+      if (legacyRevert) {
+        await input.client.session.promptAsync({
+          sessionID: input.draft.sessionID,
+          agent: input.draft.agent,
+          model: input.draft.model,
+          messageID,
+          parts: requestParts,
+          variant: input.draft.variant,
+        })
+      } else {
+        await input.client.v2.session.prompt({
+          sessionID: input.draft.sessionID,
+          id: messageID,
+          prompt: toPromptInput(requestParts),
+          delivery: "steer",
+        })
+      }
       await input.sync.track.refresh(input.draft.sessionID)
+      await input.sync.session.sync(input.draft.sessionID, { force: true }).catch(() => {})
       removeLegacy()
       setIdle()
       return true

@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect, Exit, Fiber, Layer, Stream } from "effect"
+import { DateTime, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
 import { eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -7,6 +7,8 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventTable } from "@opencode-ai/core/event/sql"
 import { SessionEvent } from "@opencode-ai/core/session/event"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import { Project } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { AbsolutePath } from "@opencode-ai/core/schema"
@@ -103,6 +105,21 @@ const eventCount = (type: string) =>
         Effect.map((rows) => rows.length),
       ),
   )
+
+const encodeMessage = Schema.encodeSync(SessionMessage.Message)
+const assistantRow = (id: SessionMessage.ID, seq: number) => {
+  const { id: _, type, ...data } = encodeMessage(
+    SessionMessage.Assistant.make({
+      id,
+      type: "assistant",
+      agent: "build",
+      model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
+      content: [],
+      time: { created: DateTime.makeUnsafe(0) },
+    }),
+  )
+  return { id, session_id: sessionID, type, seq, time_created: 0, data }
+}
 
 describe("SessionV2.prompt", () => {
   it.effect("exposes the execution registry", () =>
@@ -219,6 +236,60 @@ describe("SessionV2.prompt", () => {
         delivery: "steer",
         resume: false,
       })
+    }),
+  )
+
+  it.effect("commits a staged revert before admitting a new prompt", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+
+      const boundary = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "boundary" }),
+        resume: false,
+      })
+      yield* SessionInput.promoteSteers(db, events, sessionID, Number.MAX_SAFE_INTEGER)
+      const stale = SessionMessage.ID.make("msg_stale_assistant")
+      yield* db.insert(SessionMessageTable).values(assistantRow(stale, 100)).run().pipe(Effect.orDie)
+      yield* events.publish(SessionEvent.RevertEvent.Staged, {
+        sessionID,
+        timestamp: yield* DateTime.now,
+        revert: { messageID: boundary.id, files: [] },
+      })
+      expect((yield* session.get(sessionID)).revert?.messageID).toBe(boundary.id)
+
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "after revert" }), resume: false })
+
+      expect((yield* session.get(sessionID)).revert).toBeUndefined()
+      expect(
+        (yield* db.select({ id: SessionMessageTable.id }).from(SessionMessageTable).all().pipe(Effect.orDie)).map(
+          (row) => row.id,
+        ),
+      ).not.toContain(stale)
+    }),
+  )
+
+  it.effect("rejects a V2 prompt when the staged boundary is legacy-only", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const legacyBoundary = SessionMessage.ID.make("msg_legacy_boundary")
+
+      yield* events.publish(SessionEvent.RevertEvent.Staged, {
+        sessionID,
+        timestamp: yield* DateTime.now,
+        revert: { messageID: legacyBoundary, files: [] },
+      })
+
+      const failure = yield* session
+        .prompt({ sessionID, prompt: Prompt.make({ text: "continue" }), resume: false })
+        .pipe(Effect.flip)
+
+      expect(failure).toMatchObject({ _tag: "Session.PromptConflictError", sessionID })
     }),
   )
 

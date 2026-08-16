@@ -381,10 +381,19 @@ const layer = Layer.effect(
       prompt: Effect.fn("V2Session.prompt")((input) =>
         Effect.uninterruptible(
           Effect.gen(function* () {
-            yield* result.get(input.sessionID)
+            const session = yield* result.get(input.sessionID)
             const prompt = resolvePrompt(input.prompt)
             const messageID = input.id ?? SessionMessage.ID.create()
             const delivery = input.delivery ?? "steer"
+            // Commit only V2 reverts; legacy boundaries are cleaned by the legacy prompt path.
+            if (session.revert) {
+              const projected = yield* SessionRevert.hasBoundary({
+                sessionID: session.id,
+                messageID: session.revert.messageID,
+              }).pipe(Effect.provideService(Database.Service, database))
+              if (!projected) return yield* new PromptConflictError({ sessionID: input.sessionID, messageID })
+              yield* SessionRevert.commit(session).pipe(Effect.provideService(EventV2.Service, events))
+            }
             const expected = { sessionID: input.sessionID, messageID, prompt, delivery }
             const admitted = yield* SessionInput.admit(db, events, {
               id: messageID,

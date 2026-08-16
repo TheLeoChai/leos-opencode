@@ -3,10 +3,47 @@ import { expect, test } from "bun:test"
 import type {
   DiveInInfo,
   Event,
+  Message,
   OpencodeClient,
   SessionMessage,
 } from "@opencode-ai/sdk/v2/client"
-import { createTrackSessionSync, TRACK_EVENT_REFRESH_INTERVAL_MS } from "./track-session"
+import { createTrackSessionSync, mergeTrackMessages, TRACK_EVENT_REFRESH_INTERVAL_MS } from "./track-session"
+
+test("merges legacy and projected track messages without dropping either transcript", () => {
+  const user = (id: string, created: number): Message => ({
+    id,
+    sessionID: "ses_track",
+    role: "user",
+    time: { created },
+    agent: "build",
+    model: { providerID: "provider", modelID: "model" },
+  })
+  const assistant = (id: string, created: number): Message => ({
+    id,
+    sessionID: "ses_track",
+    role: "assistant",
+    time: { created, completed: created },
+    parentID: "shared",
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "build",
+    path: { cwd: "/repo", root: "/repo" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  })
+  const legacy = [user("legacy", 1), user("shared", 2)]
+  const projected = [user("projected", 3), assistant("shared", 4)]
+
+  expect(mergeTrackMessages(legacy, projected).map((message) => message.id)).toEqual([
+    "legacy",
+    "projected",
+    "shared",
+  ])
+  expect(mergeTrackMessages(legacy, projected).find((message) => message.id === "shared")).toMatchObject({
+    role: "assistant",
+  })
+})
 
 test("refreshes a track projection when a V2 session event arrives", async () => {
   const user: SessionMessage = {
@@ -69,6 +106,8 @@ test("refreshes a track projection when a V2 session event arrives", async () =>
 
   await root.sync.refresh("ses_track")
   expect(root.sync.messages("ses_track")).toHaveLength(1)
+  expect(root.sync.isProjected("ses_track", "msg_user")).toBe(true)
+  expect(root.sync.isProjected("ses_track", "legacy-user")).toBe(false)
   expect(fetches).toBe(1)
 
   version = 1

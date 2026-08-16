@@ -585,8 +585,9 @@ export const {
           if (last.role === "user") return "working"
           return last.time.completed ? "idle" : "working"
         },
-        async sync(sessionID: string) {
-          if (fullSyncedSessions.has(sessionID)) return
+        async sync(sessionID: string, options?: { force?: boolean }) {
+          if (!options?.force && fullSyncedSessions.has(sessionID)) return
+          fullSyncedSessions.delete(sessionID)
           const syncing = syncingSessions.get(sessionID)
           if (syncing) return syncing
           const tracker = { messages: new Set<string>(), parts: new Set<string>() }

@@ -21,6 +21,12 @@ type RefreshSchedule = {
 
 export const TRACK_EVENT_REFRESH_INTERVAL_MS = 200
 
+export function mergeTrackMessages(legacy: readonly Message[] | undefined, projected: readonly Message[] | undefined) {
+  const messages = new Map((legacy ?? []).map((message) => [message.id, message]))
+  for (const message of projected ?? []) messages.set(message.id, message)
+  return [...messages.values()].sort(cmpMessage)
+}
+
 export function createTrackSessionSync(input: {
   client: OpencodeClient
   tracks: () => readonly DiveInInfo[] | undefined
@@ -208,6 +214,8 @@ export function createTrackSessionSync(input: {
     ensure,
     refresh,
     loaded: (sessionID: string) => !!data.loaded[sessionID],
+    isProjected: (sessionID: string, messageID: string) =>
+      fetched.get(sessionID)?.messages.some((message) => message.id === messageID) ?? false,
     messages: (sessionID: string) => data.messages[sessionID],
     messageSession: (messageID: string) => data.messageSession[messageID],
     parts: (messageID: string) => data.parts[messageID],

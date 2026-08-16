@@ -57,6 +57,17 @@ const plan = Effect.fn("SessionRevert.plan")(function* (input: BoundaryInput) {
   return files
 })
 
+export const hasBoundary = Effect.fn("SessionRevert.hasBoundary")(function* (input: BoundaryInput) {
+  const db = (yield* Database.Service).db
+  const boundary = yield* db
+    .select({ seq: SessionMessageTable.seq })
+    .from(SessionMessageTable)
+    .where(and(eq(SessionMessageTable.session_id, input.sessionID), eq(SessionMessageTable.id, input.messageID)))
+    .get()
+    .pipe(Effect.orDie)
+  return boundary !== undefined
+})
+
 export const stage = Effect.fn("SessionRevert.stage")(function* (input: {
   readonly session: SessionSchema.Info
   readonly messageID: SessionMessage.ID

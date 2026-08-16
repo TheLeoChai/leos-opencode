@@ -5,7 +5,7 @@ import { produce, reconcile, type SetStoreFunction } from "solid-js/store"
 import type { createServerSdkContext } from "./server-sdk"
 import type { createServerSyncContextInner } from "./server-sync"
 import type { State } from "./global-sync/types"
-import { createTrackSessionSync } from "./track-session"
+import { createTrackSessionSync, mergeTrackMessages } from "./track-session"
 
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 const sessionFields = new Set([
@@ -38,9 +38,11 @@ export const createDirSyncContext = (
     get(target, property, receiver) {
       if (typeof property !== "string" || !track.isSession(property)) return Reflect.get(target, property, receiver)
       track.ensure(property)
-      if (track.loaded(property)) return track.messages(property) ?? []
-      const pending = track.messages(property)
-      return pending?.length ? pending : undefined
+      const legacy = Reflect.get(target, property, receiver) as Message[] | undefined
+      const projected = track.messages(property)
+      const messages = mergeTrackMessages(legacy, projected)
+      if (track.loaded(property)) return messages
+      return messages.length ? messages : undefined
     },
   })
   const part = new Proxy(serverSync.session.data.part, {
@@ -169,6 +171,7 @@ export const createDirSyncContext = (
     },
     track: {
       isSession: track.isSession,
+      isProjected: track.isProjected,
       refresh: track.refresh,
       optimistic: track.optimistic,
     },

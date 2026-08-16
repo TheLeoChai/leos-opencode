@@ -1136,16 +1136,36 @@ export function Prompt(props: PromptProps) {
         parts: nonTextParts,
       })
       const messageID = createDiveInPromptID()
-      data.session.message.addPending(sessionID!, toDiveInPendingMessage(messageID, prompt, nonTextParts))
+      const revert = sync.session.get(sessionID!)?.revert
+      const legacyRevert =
+        !!revert && !(data.session.message.committed(sessionID!) ?? []).some((message) => message.id === revert.messageID)
+      if (!legacyRevert) data.session.message.addPending(sessionID!, toDiveInPendingMessage(messageID, prompt, nonTextParts))
       move.startSubmit()
-      void submitDiveInPrompt(sdk.client.v2.session, sessionID!, prompt, messageID).catch((error) => {
-        data.session.message.removePending(sessionID!, messageID)
-        toast.show({
-          title: "Failed to send prompt",
-          message: errorMessage(error),
-          variant: "error",
-        })
-      })
+      const request = legacyRevert
+        ? sdk.client.session.promptAsync({
+            sessionID: sessionID!,
+            agent: agent.name,
+            model: selectedModel,
+            messageID,
+            parts: [
+              ...editorParts,
+              { type: "text" as const, text: inputText },
+              ...nonTextParts,
+            ],
+            variant,
+          })
+        : submitDiveInPrompt(sdk.client.v2.session, sessionID!, prompt, messageID)
+      void request.then(
+        () => sync.session.sync(sessionID!, { force: true }).catch(() => {}),
+        (error) => {
+          if (!legacyRevert) data.session.message.removePending(sessionID!, messageID)
+          toast.show({
+            title: "Failed to send prompt",
+            message: errorMessage(error),
+            variant: "error",
+          })
+        },
+      )
       if (editorParts.length > 0) editor.markSelectionSent()
     } else {
       move.startSubmit()

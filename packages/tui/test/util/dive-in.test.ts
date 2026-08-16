@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import type { DiveInInfo, PromptInput, SessionMessage } from "@opencode-ai/sdk/v2"
+import type { DiveInInfo, Message, PromptInput, SessionMessage } from "@opencode-ai/sdk/v2"
 import type { PromptInfo } from "../../src/prompt/history"
 import {
   adaptDiveInMessages,
   findDiveInTrack,
   isActiveDiveInTrack,
+  mergeDiveInMessages,
   submitDiveInPrompt,
+  trackInitialPrompt,
   toDiveInPrompt,
 } from "../../src/util/dive-in"
 
@@ -43,6 +45,11 @@ describe("util.dive-in", () => {
     expect(isActiveDiveInTrack({ ...track("ses_completed"), status: "completed" })).toBeFalse()
     expect(isActiveDiveInTrack({ ...track("ses_closed"), status: "closed" })).toBeFalse()
     expect(isActiveDiveInTrack(undefined)).toBeFalse()
+  })
+
+  test("does not duplicate the raw prompt when the wrapped prompt is visible", () => {
+    expect(trackInitialPrompt("inspect the auth flow", "Focused task: inspect the auth flow")).toBeUndefined()
+    expect(trackInitialPrompt("inspect the auth flow", "A different prompt")).toBe("inspect the auth flow")
   })
 
   test("converts editor text and supported file and agent parts", () => {
@@ -134,5 +141,41 @@ describe("util.dive-in", () => {
     expect(result.parts.msg_user?.[0]).toMatchObject({ type: "text", text: "Start", sessionID: "ses_track" })
     expect(result.parts.msg_assistant?.[0]).toMatchObject({ type: "text", text: "Done" })
     expect(result.messages[1]).toMatchObject({ parentID: "msg_user", modelID: "model", providerID: "provider" })
+  })
+
+  test("keeps legacy track messages alongside the V2 projection", () => {
+    const user = (id: string, created: number): Message => ({
+      id,
+      sessionID: "ses_track",
+      role: "user",
+      time: { created },
+      agent: "build",
+      model: { providerID: "provider", modelID: "model" },
+    })
+    const assistant: Message = {
+      id: "shared",
+      sessionID: "ses_track",
+      role: "assistant",
+      time: { created: 4, completed: 4 },
+      parentID: "shared",
+      modelID: "model",
+      providerID: "provider",
+      mode: "build",
+      agent: "build",
+      path: { cwd: "/repo", root: "/repo" },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    }
+    const legacy = [user("legacy", 1), user("shared", 2)]
+    const projected = [user("projected", 3), assistant]
+
+    expect(mergeDiveInMessages(legacy, projected).map((message) => message.id)).toEqual([
+      "legacy",
+      "projected",
+      "shared",
+    ])
+    expect(mergeDiveInMessages(legacy, projected).find((message) => message.id === "shared")).toMatchObject({
+      role: "assistant",
+    })
   })
 })

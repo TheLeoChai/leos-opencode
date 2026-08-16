@@ -15,6 +15,14 @@ describe("timeline model", () => {
     expect(selectVisibleUserMessages(users)).toBe(users)
   })
 
+  test("uses the loaded message order instead of lexical IDs for revert boundaries", () => {
+    const users = [user("msg_z9-before"), user("msg_z1-before-wrap"), user("msg_a0-after-wrap")]
+
+    expect(selectVisibleUserMessages(users, "msg_z1-before-wrap").map((message) => message.id)).toEqual([
+      "msg_z9-before",
+    ])
+  })
+
   test("waits for an assistant-only load to hydrate its user root", () => {
     expect(isTimelineReady([assistant("msg_2")], true)).toBe(false)
     expect(isTimelineReady([user("msg_1"), assistant("msg_2")], true)).toBe(true)

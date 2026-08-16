@@ -112,6 +112,10 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
         )
         revision.bump(sessionID)
       },
+      reset(sessionID: string) {
+        setStore("session", "message", sessionID, [])
+        revision.bump(sessionID)
+      },
       addPending(sessionID: string, item: SessionMessage) {
         setStore(
           "session",
@@ -209,6 +213,10 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           break
         }
         case "session.next.prompt.admitted":
+          break
+        case "session.next.revert.committed":
+          message.reset(event.data.sessionID)
+          void result.session.message.refresh(event.data.sessionID)
           break
         case "session.next.prompt.cancelled":
           message.removePending(event.data.sessionID, event.data.messageID)
@@ -472,6 +480,9 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           setStore("session", "info", sessionID, result.data.data)
         },
         message: {
+          committed(sessionID: string) {
+            return store.session.message[sessionID]
+          },
           list(sessionID: string) {
             const committed = store.session.message[sessionID]
             const pending = store.session.pending[sessionID]

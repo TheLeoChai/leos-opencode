@@ -85,7 +85,13 @@ import { getRevertDiffFiles } from "../../util/revert-diff"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 import { usePathFormatter } from "../../context/path-format"
 import { LocationProvider } from "../../context/location"
-import { adaptDiveInMessages, findDiveInTrack, isActiveDiveInTrack } from "../../util/dive-in"
+import {
+  adaptDiveInMessages,
+  findDiveInTrack,
+  isActiveDiveInTrack,
+  mergeDiveInMessages,
+  trackInitialPrompt,
+} from "../../util/dive-in"
 
 addDefaultParsers(parsers.parsers)
 
@@ -238,14 +244,35 @@ export function Session() {
   })
   const trackTimeline = createMemo(() => {
     if (!diveInTrack()) return
-    return adaptDiveInMessages({
+    const timeline = adaptDiveInMessages({
       sessionID: route.sessionID,
       messages: data.session.message.list(route.sessionID) ?? [],
       session: data.session.get(route.sessionID),
     })
+    return {
+      ...timeline,
+      messages: mergeDiveInMessages(sync.data.message[route.sessionID], timeline.messages),
+    }
   })
   const messages = createMemo(() => trackTimeline()?.messages ?? sync.data.message[route.sessionID] ?? [])
   const messageParts = (messageID: string) => trackTimeline()?.parts[messageID] ?? sync.data.part[messageID] ?? []
+  const isProjectedTrackMessage = (messageID: string) =>
+    !!diveInTrack() && (data.session.message.committed(route.sessionID) ?? []).some((message) => message.id === messageID)
+  const stageRevert = (messageID: string) => {
+    if (!isProjectedTrackMessage(messageID))
+      return sdk.client.session.revert({ sessionID: route.sessionID, messageID })
+    return sdk.client.v2.session.revert
+      .stage({ sessionID: route.sessionID, messageID })
+      .then(() => sync.session.sync(route.sessionID, { force: true }))
+  }
+  const clearRevert = () => {
+    const messageID = session()?.revert?.messageID
+    if (!messageID || !isProjectedTrackMessage(messageID))
+      return sdk.client.session.unrevert({ sessionID: route.sessionID })
+    return sdk.client.v2.session.revert
+      .clear({ sessionID: route.sessionID })
+      .then(() => sync.session.sync(route.sessionID, { force: true }))
+  }
   const foregroundTasks = createMemo(() =>
     sync.data.capabilities.experimentalBackgroundSubagents
       ? messages().flatMap((message) =>
@@ -262,12 +289,14 @@ export function Session() {
   const diveInInitialPrompt = createMemo(() => {
     const prompt = diveInTrack()?.prompt
     if (!prompt) return undefined
-    const hasPrompt = messages().some(
-      (message) =>
-        message.role === "user" &&
-        messageParts(message.id).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("") === prompt,
-    )
-    return hasPrompt ? undefined : prompt
+    const text = messages()
+      .flatMap((message) =>
+        message.role === "user"
+          ? messageParts(message.id).flatMap((part) => (part.type === "text" ? [part.text] : []))
+          : [],
+      )
+      .join("\n")
+    return trackInitialPrompt(prompt, text)
   })
   const visible = createMemo(
     () => (!session()?.parentID || !!diveInTrack()) && permissions().length === 0 && questions().length === 0,
@@ -656,6 +685,10 @@ export function Session() {
               if (child) scroll.scrollBy(child.y - scroll.y - 1)
             }}
             sessionID={route.sessionID}
+            isDiveInTrack={!!diveInTrack()}
+            isV2Message={isProjectedTrackMessage}
+            messages={messages}
+            parts={messageParts}
             setPrompt={(promptInfo) => prompt?.set(promptInfo)}
           />
         ))
@@ -822,13 +855,13 @@ export function Session() {
         const status = sync.data.session_status?.[route.sessionID]
         if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
         const revert = session()?.revert?.messageID
-        const message = messages().findLast((x) => (!revert || x.id < revert) && x.role === "user")
+        const boundary = revert ? messages().findIndex((message) => message.id === revert) : messages().length
+        if (boundary < 0) return
+        const message = messages()
+          .slice(0, boundary)
+          .findLast((item) => item.role === "user")
         if (!message) return
-        void sdk.client.session
-          .revert({
-            sessionID: route.sessionID,
-            messageID: message.id,
-          })
+        void stageRevert(message.id)
           .then(() => {
             toBottom()
           })
@@ -860,18 +893,17 @@ export function Session() {
         dialog.clear()
         const messageID = session()?.revert?.messageID
         if (!messageID) return
-        const message = messages().find((x) => x.role === "user" && x.id > messageID)
+        const boundary = messages().findIndex((message) => message.id === messageID)
+        if (boundary < 0) return
+        const message = messages()
+          .slice(boundary + 1)
+          .find((item) => item.role === "user")
         if (!message) {
-          void sdk.client.session.unrevert({
-            sessionID: route.sessionID,
-          })
+          void clearRevert()
           prompt?.set({ input: "", parts: [] })
           return
         }
-        void sdk.client.session.revert({
-          sessionID: route.sessionID,
-          messageID: message.id,
-        })
+        void stageRevert(message.id)
       },
     },
     {
@@ -1084,8 +1116,14 @@ export function Session() {
       category: "Session",
       run: () => {
         const revertID = session()?.revert?.messageID
+        const boundary = revertID ? messages().findIndex((message) => message.id === revertID) : messages().length
+        if (boundary < 0) {
+          toast.show({ message: "No assistant messages found", variant: "error" })
+          dialog.clear()
+          return
+        }
         const lastAssistantMessage = messages().findLast(
-          (msg) => msg.role === "assistant" && (!revertID || msg.id < revertID),
+          (msg) => msg.role === "assistant" && messages().findIndex((message) => message.id === msg.id) < boundary,
         )
         if (!lastAssistantMessage) {
           toast.show({ message: "No assistant messages found", variant: "error" })
@@ -1335,7 +1373,14 @@ export function Session() {
   const revertRevertedMessages = createMemo(() => {
     const messageID = revertMessageID()
     if (!messageID) return []
-    return messages().filter((x) => x.id >= messageID && x.role === "user")
+    const boundary = messages().findIndex((message) => message.id === messageID)
+    if (boundary < 0) return []
+    return messages().slice(boundary).filter((message) => message.role === "user")
+  })
+
+  const revertBoundary = createMemo(() => {
+    const messageID = revertMessageID()
+    return messageID ? messages().findIndex((message) => message.id === messageID) : -1
   })
 
   const revert = createMemo(() => {
@@ -1466,7 +1511,13 @@ export function Session() {
                           )
                         })()}
                       </Match>
-                      <Match when={revert()?.messageID && message.id >= revert()!.messageID}>
+                      <Match
+                        when={
+                          revert()?.messageID &&
+                          revertBoundary() >= 0 &&
+                          messages().findIndex((item) => item.id === message.id) >= revertBoundary()
+                        }
+                      >
                         <></>
                       </Match>
                       <Match when={message.role === "user"}>
@@ -1478,6 +1529,10 @@ export function Session() {
                               <DialogMessage
                                 messageID={message.id}
                                 sessionID={route.sessionID}
+                                isDiveInTrack={!!diveInTrack()}
+                                isV2Message={isProjectedTrackMessage}
+                                messages={messages}
+                                parts={messageParts}
                                 setPrompt={(promptInfo) => prompt?.set(promptInfo)}
                               />
                             ))

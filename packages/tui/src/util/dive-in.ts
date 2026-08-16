@@ -26,6 +26,18 @@ export function isActiveDiveInTrack(track: DiveInInfo["tracks"][number] | undefi
   return track?.status === "active"
 }
 
+export function mergeDiveInMessages(legacy: readonly Message[] | undefined, projected: readonly Message[] | undefined) {
+  const messages = new Map((legacy ?? []).map((message) => [message.id, message]))
+  for (const message of projected ?? []) messages.set(message.id, message)
+  return [...messages.values()].sort((a, b) => a.time.created - b.time.created || a.id.localeCompare(b.id))
+}
+
+export function trackInitialPrompt(prompt: string, messageText: string) {
+  const value = prompt.trim()
+  if (!value || messageText.includes(value)) return
+  return prompt
+}
+
 export function createDiveInPromptID() {
   return Identifier.ascending("message")
 }

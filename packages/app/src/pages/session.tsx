@@ -1868,9 +1868,23 @@ export default function Page() {
           .catch(() => {})
       : Promise.resolve()
 
+  const stageRevert = (input: { sessionID: string; messageID: string }) => {
+    const client = sdk().client
+    if (!isDiveInTrack() || !sync().track.isProjected(input.sessionID, input.messageID))
+      return client.session.revert(input)
+    return client.v2.session.revert.stage(input).then(() => client.session.get({ sessionID: input.sessionID }))
+  }
+
+  const clearRevert = (sessionID: string) => {
+    const client = sdk().client
+    const messageID = sync().session.get(sessionID)?.revert?.messageID
+    if (!isDiveInTrack() || !messageID || !sync().track.isProjected(sessionID, messageID))
+      return client.session.unrevert({ sessionID })
+    return client.v2.session.revert.clear({ sessionID }).then(() => client.session.get({ sessionID }))
+  }
+
   const revertMutation = useMutation(() => ({
     mutationFn: async (input: { sessionID: string; messageID: string }) => {
-      const client = sdk().client
       const target = sync()
       const last = target.session.get(input.sessionID)?.revert
       const value = draft(input.messageID)
@@ -1880,7 +1894,7 @@ export default function Page() {
           roll(input.sessionID, { messageID: input.messageID }, target)
           prompt.set(value)
         },
-        request: () => halt(input.sessionID).then(() => client.session.revert(input)),
+        request: () => halt(input.sessionID).then(() => stageRevert(input)),
         complete: (result) => {
           if (result.data) merge(result.data, target)
         },
@@ -1895,9 +1909,10 @@ export default function Page() {
       const sessionID = params.id
       if (!sessionID) return
 
-      const client = sdk().client
       const target = sync()
-      const next = userMessages().find((item) => item.id > id)
+      const index = userMessages().findIndex((item) => item.id === id)
+      if (index < 0) return
+      const next = userMessages()[index + 1]
       const last = target.session.get(sessionID)?.revert
 
       await runPromptRollbackMutation({
@@ -1912,8 +1927,8 @@ export default function Page() {
         },
         request: () =>
           !next
-            ? halt(sessionID).then(() => client.session.unrevert({ sessionID }))
-            : halt(sessionID).then(() => client.session.revert({ sessionID, messageID: next.id })),
+            ? halt(sessionID).then(() => clearRevert(sessionID))
+            : halt(sessionID).then(() => stageRevert({ sessionID, messageID: next.id })),
         complete: (result) => {
           if (result.data) merge(result.data, target)
         },
@@ -1939,8 +1954,10 @@ export default function Page() {
   const rolled = createMemo(() => {
     const id = revertMessageID()
     if (!id) return []
+    const index = userMessages().findIndex((item) => item.id === id)
+    if (index < 0) return []
     return userMessages()
-      .filter((item) => item.id >= id)
+      .slice(index)
       .map((item) => ({ id: item.id, text: line(item.id) }))
   })
 
