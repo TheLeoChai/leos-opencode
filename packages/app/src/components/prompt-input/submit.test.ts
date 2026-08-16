@@ -31,6 +31,7 @@ const toastDescriptions: string[] = []
 const syncedDirectories: string[] = []
 const promotedDrafts: Array<{ draftID: string; server: string; sessionId: string }> = []
 const sentV2Prompts: Array<{ sessionID: string; id?: string; prompt: unknown; delivery: string }> = []
+const switchedV2Models: Array<{ sessionID: string; model: { id: string; providerID: string; variant?: string } }> = []
 
 let params: { id?: string } = {}
 let search: { draftId?: string } = {}
@@ -98,6 +99,10 @@ const clientFor = (directory: string) => {
     },
     v2: {
       session: {
+        switchModel: async (input: { sessionID: string; model: { id: string; providerID: string; variant?: string } }) => {
+          switchedV2Models.push(input)
+          return { data: undefined }
+        },
         prompt: async (input: { sessionID: string; id?: string; prompt: unknown; delivery: string }) => {
           sentV2Prompts.push(input)
           if (v2PromptError) throw v2PromptError
@@ -312,6 +317,7 @@ beforeEach(() => {
   promoted.length = 0
   promotedDrafts.length = 0
   sentV2Prompts.length = 0
+  switchedV2Models.length = 0
   sentLegacyPrompts.length = 0
   removedLegacyOptimistic.length = 0
   trackOptimisticEvents.length = 0
@@ -595,6 +601,7 @@ describe("prompt submit worktree selection", () => {
       prompt: { text: "ls" },
     })
     expect(sentV2Prompts[0]?.id).toMatch(/^msg_/)
+    expect(switchedV2Models).toEqual([{ sessionID: "session-1", model: { id: "model", providerID: "provider" } }])
     expect(removedLegacyOptimistic).toHaveLength(1)
     expect(trackOptimisticEvents).toEqual([expect.stringMatching(/^add:msg_/), "refresh"])
     expect(sessionSyncs).toEqual(["session-1:true"])

@@ -193,6 +193,14 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
           variant: input.draft.variant,
         })
       } else {
+        await input.client.v2.session.switchModel({
+          sessionID: input.draft.sessionID,
+          model: {
+            id: input.draft.model.modelID,
+            providerID: input.draft.model.providerID,
+            ...(input.draft.variant === undefined ? {} : { variant: input.draft.variant }),
+          },
+        })
         await input.client.v2.session.prompt({
           sessionID: input.draft.sessionID,
           id: messageID,

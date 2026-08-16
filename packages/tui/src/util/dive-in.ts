@@ -106,6 +106,10 @@ export function toDiveInPendingMessage(id: string, prompt: PromptInput, parts: P
 }
 
 type DiveInPromptClient = {
+  switchModel: (input: {
+    sessionID: string
+    model: { id: string; providerID: string; variant?: string }
+  }) => Promise<unknown>
   prompt: (
     input: {
       sessionID: string
@@ -122,16 +126,19 @@ export function submitDiveInPrompt(
   sessionID: string,
   prompt: PromptInput,
   id = createDiveInPromptID(),
+  model?: { id: string; providerID: string; variant?: string },
 ) {
-  return client.prompt(
-    {
-      sessionID,
-      id,
-      prompt,
-      delivery: "steer",
-    },
-    { throwOnError: true },
-  )
+  const send = () =>
+    client.prompt(
+      {
+        sessionID,
+        id,
+        prompt,
+        delivery: "steer",
+      },
+      { throwOnError: true },
+    )
+  return model ? client.switchModel({ sessionID, model }).then(send) : send()
 }
 
 export function adaptDiveInMessages(input: {

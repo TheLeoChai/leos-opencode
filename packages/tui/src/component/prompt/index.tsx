@@ -1154,7 +1154,11 @@ export function Prompt(props: PromptProps) {
             ],
             variant,
           })
-        : submitDiveInPrompt(sdk.client.v2.session, sessionID!, prompt, messageID)
+        : submitDiveInPrompt(sdk.client.v2.session, sessionID!, prompt, messageID, {
+            id: selectedModel.modelID,
+            providerID: selectedModel.providerID,
+            ...(variant === undefined ? {} : { variant }),
+          })
       void request.then(
         () => sync.session.sync(sessionID!, { force: true }).catch(() => {}),
         (error) => {

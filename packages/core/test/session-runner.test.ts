@@ -945,6 +945,32 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.effect("does not strand an input when model resolution fails before promotion", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      modelResolveHook = Effect.die("model unavailable")
+      const prompt = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Retry after model recovery" }),
+        resume: false,
+      })
+
+      const failure = yield* session.resume(sessionID).pipe(Effect.exit)
+      expect(Exit.isFailure(failure)).toBe(true)
+      expect(yield* SessionInput.find((yield* Database.Service).db, prompt.id)).not.toHaveProperty("promotedSeq")
+      expect(yield* session.messages({ sessionID })).toEqual([])
+
+      modelResolveHook = Effect.void
+      response = []
+      requests.length = 0
+      yield* session.resume(sessionID)
+
+      expect(userTexts(requests[0]!)).toEqual(["Retry after model recovery"])
+      expect(yield* SessionInput.find((yield* Database.Service).db, prompt.id)).toHaveProperty("promotedSeq")
+    }),
+  )
+
   it.effect("admits removed context as a chronological System message", () =>
     Effect.gen(function* () {
       yield* setup

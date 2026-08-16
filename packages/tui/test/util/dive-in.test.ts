@@ -90,7 +90,12 @@ describe("util.dive-in", () => {
       input: { sessionID: string; id?: string; prompt?: PromptInput; delivery?: "steer" | "queue" }
       options?: { throwOnError?: boolean }
     }> = []
+    const models: Array<{ sessionID: string; model: { id: string; providerID: string; variant?: string } }> = []
     const client = {
+      switchModel(input: { sessionID: string; model: { id: string; providerID: string; variant?: string } }) {
+        models.push(input)
+        return Promise.resolve()
+      },
       prompt(
         input: { sessionID: string; id?: string; prompt?: PromptInput; delivery?: "steer" | "queue" },
         options?: { throwOnError?: boolean },
@@ -100,10 +105,15 @@ describe("util.dive-in", () => {
       },
     }
 
-    await submitDiveInPrompt(client, "ses_track", { text: "first" })
+    await submitDiveInPrompt(client, "ses_track", { text: "first" }, undefined, {
+      id: "model",
+      providerID: "provider",
+      variant: "max",
+    })
     await submitDiveInPrompt(client, "ses_track", { text: "second" })
 
     expect(calls).toHaveLength(2)
+    expect(models).toEqual([{ sessionID: "ses_track", model: { id: "model", providerID: "provider", variant: "max" } }])
     expect(calls[0]?.input).toMatchObject({
       sessionID: "ses_track",
       prompt: { text: "first" },
