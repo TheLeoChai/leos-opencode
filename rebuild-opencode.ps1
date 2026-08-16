@@ -14,8 +14,16 @@ $previousBuildDir = $env:OPENCODE_BUILD_DIR
 
 function Set-UserPathFirst([string]$entry) {
   $normalized = $entry.TrimEnd("\")
+  $legacyRepo = Join-Path (Split-Path -Parent $repo) "Opencode"
+  $legacyEntries = @(
+    (Join-Path $legacyRepo "bin").TrimEnd("\"),
+    (Join-Path $legacyRepo "packages\opencode\dist\opencode-windows-x64\bin").TrimEnd("\")
+  )
   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-  $entries = $userPath -split ";" | Where-Object { $_ -and $_.TrimEnd("\") -ine $normalized }
+  $entries = $userPath -split ";" | Where-Object {
+    $value = $_.TrimEnd("\")
+    $_ -and $value -ine $normalized -and $legacyEntries -notcontains $value
+  }
   [Environment]::SetEnvironmentVariable("Path", "$entry;$($entries -join ';')", "User")
 }
 
