@@ -1868,18 +1868,20 @@ export default function Page() {
           .catch(() => {})
       : Promise.resolve()
 
-  const stageRevert = (input: { sessionID: string; messageID: string }) => {
+  const stageRevert = async (input: { sessionID: string; messageID: string }) => {
     const client = sdk().client
-    if (!isDiveInTrack() || !sync().track.isProjected(input.sessionID, input.messageID))
-      return client.session.revert(input)
+    if (!isDiveInTrack()) return client.session.revert(input)
+    await sync().track.refresh(input.sessionID)
+    if (!sync().track.isProjected(input.sessionID, input.messageID)) return client.session.revert(input)
     return client.v2.session.revert.stage(input).then(() => client.session.get({ sessionID: input.sessionID }))
   }
 
-  const clearRevert = (sessionID: string) => {
+  const clearRevert = async (sessionID: string) => {
     const client = sdk().client
     const messageID = sync().session.get(sessionID)?.revert?.messageID
-    if (!isDiveInTrack() || !messageID || !sync().track.isProjected(sessionID, messageID))
-      return client.session.unrevert({ sessionID })
+    if (!isDiveInTrack() || !messageID) return client.session.unrevert({ sessionID })
+    await sync().track.refresh(sessionID)
+    if (!sync().track.isProjected(sessionID, messageID)) return client.session.unrevert({ sessionID })
     return client.v2.session.revert.clear({ sessionID }).then(() => client.session.get({ sessionID }))
   }
 

@@ -1872,6 +1872,13 @@ export default function LegacyLayout(props: ParentProps) {
       return sessionID ? groups.filter((group) => group.sessionID === sessionID) : groups
     },
     completeDiveInTrack: async (directory, input) => {
+      const child = serverSync().child(directory, { bootstrap: false })[0]
+      const track = child.dive_in
+        ?.find((group) => group.id === input.diveInID && group.sessionID === input.sessionID)
+        ?.tracks.find((item) => item.id === input.trackID)
+      if (!track || track.status !== "active") return
+      const status = child.session_status[input.sessionID]
+      if (status?.type === "busy" || status?.type === "retry") return
       try {
         await serverSync()
           .client(directory)

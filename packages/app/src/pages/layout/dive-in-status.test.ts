@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { DiveInTrack, SessionStatus } from "@opencode-ai/sdk/v2/client"
-import { diveInTrackState } from "./dive-in-status"
+import { diveInTrackCanComplete, diveInTrackState } from "./dive-in-status"
 
 const track = (status: DiveInTrack["status"]): DiveInTrack => ({
   id: "dtrk_test",
@@ -30,5 +30,16 @@ describe("diveInTrackState", () => {
 
   test("keeps an active track visibly queued until its session reports a status", () => {
     expect(diveInTrackState(track("active"), undefined)).toBe("queued")
+  })
+
+  test.each([
+    ["ready", true],
+    ["queued", true],
+    ["working", false],
+    ["retrying", false],
+    ["done", false],
+    ["closed", false],
+  ] as const)("allows completion only for %s tracks", (state, expected) => {
+    expect(diveInTrackCanComplete(state)).toBe(expected)
   })
 })

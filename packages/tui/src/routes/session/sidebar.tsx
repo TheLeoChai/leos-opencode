@@ -87,6 +87,11 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   }
 
   const completeDiveIn = async (group: DiveInInfo, track: DiveInInfo["tracks"][number]) => {
+    const status = trackStatus(track)
+    if (track.status !== "active" || (status !== "ready" && status !== "queued")) {
+      toast.show({ message: "The DiveIn track is not ready to be marked complete", variant: "warning" })
+      return
+    }
     try {
       await sdk.client.v2.diveIn.complete(
         { sessionID: group.sessionID, diveInID: group.id, trackID: track.id, satisfied: true },
@@ -242,7 +247,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                                     <Show
                                       when={
                                         track.status === "active" &&
-                                        (status() === "ready" || status() === "retrying" || status() === "queued")
+                                        (status() === "ready" || status() === "queued")
                                       }
                                     >
                                       <box

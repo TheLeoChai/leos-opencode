@@ -17,7 +17,7 @@ import { messageAgentColor } from "@/utils/agent"
 import { sessionTitle } from "@/utils/session-title"
 import { sessionPermissionRequest } from "../session/composer/session-request-tree"
 import { childSessionOnPath, getProjectAvatarSource, hasProjectPermissions } from "./helpers"
-import { diveInTrackState } from "./dive-in-status"
+import { diveInTrackCanComplete, diveInTrackState } from "./dive-in-status"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { DialogCancelDiveIn } from "../../components/session/dialog-cancel-dive-in"
 
@@ -386,7 +386,7 @@ export const DiveInTracks = (props: {
                         {diveInTrackStatusLabel(language, state())}
                       </span>
                     </A>
-                    <Show when={track.status === "active"}>
+                    <Show when={track.status === "active" && diveInTrackCanComplete(state())}>
                       <Tooltip value={language.t("divein.markComplete")} placement="top">
                         <IconButton
                           icon="check-small"

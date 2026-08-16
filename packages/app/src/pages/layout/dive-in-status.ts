@@ -2,6 +2,10 @@ import type { DiveInInfo, SessionStatus } from "@opencode-ai/sdk/v2/client"
 
 export type DiveInTrackState = "working" | "retrying" | "queued" | "ready" | "done" | "closed"
 
+export function diveInTrackCanComplete(state: DiveInTrackState) {
+  return state === "ready" || state === "queued"
+}
+
 export function diveInTrackState(
   track: DiveInInfo["tracks"][number],
   status: SessionStatus | undefined,
