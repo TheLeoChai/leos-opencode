@@ -258,17 +258,19 @@ export function Session() {
   const messageParts = (messageID: string) => trackTimeline()?.parts[messageID] ?? sync.data.part[messageID] ?? []
   const isProjectedTrackMessage = (messageID: string) =>
     !!diveInTrack() && (data.session.message.committed(route.sessionID) ?? []).some((message) => message.id === messageID)
-  const stageRevert = (messageID: string) => {
+  const stageRevert = async (messageID: string) => {
+    if (diveInTrack()) await data.session.message.refresh(route.sessionID)
     if (!isProjectedTrackMessage(messageID))
       return sdk.client.session.revert({ sessionID: route.sessionID, messageID })
     return sdk.client.v2.session.revert
       .stage({ sessionID: route.sessionID, messageID })
       .then(() => sync.session.sync(route.sessionID, { force: true }))
   }
-  const clearRevert = () => {
+  const clearRevert = async () => {
     const messageID = session()?.revert?.messageID
-    if (!messageID || !isProjectedTrackMessage(messageID))
-      return sdk.client.session.unrevert({ sessionID: route.sessionID })
+    if (!messageID) return sdk.client.session.unrevert({ sessionID: route.sessionID })
+    if (diveInTrack()) await data.session.message.refresh(route.sessionID)
+    if (!isProjectedTrackMessage(messageID)) return sdk.client.session.unrevert({ sessionID: route.sessionID })
     return sdk.client.v2.session.revert
       .clear({ sessionID: route.sessionID })
       .then(() => sync.session.sync(route.sessionID, { force: true }))

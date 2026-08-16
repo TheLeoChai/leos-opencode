@@ -1137,6 +1137,7 @@ export function Prompt(props: PromptProps) {
       })
       const messageID = createDiveInPromptID()
       const revert = sync.session.get(sessionID!)?.revert
+      if (revert) await data.session.message.refresh(sessionID!)
       const legacyRevert =
         !!revert && !(data.session.message.committed(sessionID!) ?? []).some((message) => message.id === revert.messageID)
       if (!legacyRevert) data.session.message.addPending(sessionID!, toDiveInPendingMessage(messageID, prompt, nonTextParts))

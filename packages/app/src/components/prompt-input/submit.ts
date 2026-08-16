@@ -182,6 +182,7 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
 
     if (isActiveTrackSession) {
       const revert = input.sync.session.get(input.draft.sessionID)?.revert
+      if (revert) await input.sync.track.refresh(input.draft.sessionID)
       const legacyRevert = revert && !input.sync.track.isProjected(input.draft.sessionID, revert.messageID)
       if (legacyRevert) {
         await input.client.session.promptAsync({

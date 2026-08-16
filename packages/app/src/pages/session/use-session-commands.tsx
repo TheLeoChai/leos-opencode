@@ -108,10 +108,11 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
   const isDiveInTrack = (sessionID: string) =>
     !!sync().data.dive_in?.some((group) => group.tracks.some((track) => track.sessionID === sessionID))
 
-  const stageRevert = (input: { sessionID: string; messageID: string }) => {
+  const stageRevert = async (input: { sessionID: string; messageID: string }) => {
     const client = sdk().client
-    if (!isDiveInTrack(input.sessionID) || !sync().track.isProjected(input.sessionID, input.messageID))
-      return client.session.revert(input)
+    if (!isDiveInTrack(input.sessionID)) return client.session.revert(input)
+    await sync().track.refresh(input.sessionID)
+    if (!sync().track.isProjected(input.sessionID, input.messageID)) return client.session.revert(input)
     return client.v2.session.revert.stage(input).then(async () => {
       const result = await client.session.get({ sessionID: input.sessionID })
       if (result.data) sync().session.remember(result.data)
@@ -119,11 +120,12 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     })
   }
 
-  const clearRevert = (sessionID: string) => {
+  const clearRevert = async (sessionID: string) => {
     const client = sdk().client
     const messageID = info()?.revert?.messageID
-    if (!isDiveInTrack(sessionID) || !messageID || !sync().track.isProjected(sessionID, messageID))
-      return client.session.unrevert({ sessionID })
+    if (!isDiveInTrack(sessionID) || !messageID) return client.session.unrevert({ sessionID })
+    await sync().track.refresh(sessionID)
+    if (!sync().track.isProjected(sessionID, messageID)) return client.session.unrevert({ sessionID })
     return client.v2.session.revert.clear({ sessionID }).then(async () => {
       const result = await client.session.get({ sessionID })
       if (result.data) sync().session.remember(result.data)
