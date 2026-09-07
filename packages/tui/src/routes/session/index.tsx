@@ -737,6 +737,7 @@ export function Session() {
           return
         }
         void sdk.client.session.summarize({
+          auto: false,
           sessionID: route.sessionID,
           modelID: selectedModel.modelID,
           providerID: selectedModel.providerID,

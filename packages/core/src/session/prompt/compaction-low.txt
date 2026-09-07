@@ -1,0 +1,15 @@
+Summarize the working detail in the frozen transcript so the next context window can resume without repeating work or asking the user to provide context again. Do not continue the task or answer questions in the transcript.
+
+Use the previous canonical summary as established context, updating it with the transcript. Preserve:
+- Difficulties and failures encountered, their causes when known, and the remedies or workarounds used.
+- Options and approaches considered, attempted, rejected, or deferred, with the reasons and evidence.
+- Requests, agreements, decisions, preferences, constraints, and boundaries in wording close to the user's own; retain exact qualifications when they affect the work.
+- The precise current state: completed and verified work, partial edits, active investigations, failing checks, and blockers.
+- Open questions, unresolved issues, promises, expected follow-up, and concrete next actions.
+- Details that are difficult to reconstruct: paths, symbols, commands, errors, names, numbers, dates, exact quotations, URLs, and references. Preserve these exactly.
+
+Condense the assistant's explanations and reasoning much more aggressively than user-provided information. Be thorough on the details above and concise elsewhere. Distinguish confirmed facts from hypotheses. Avoid duplicating enduring principles that belong in the separate high-level pass, while retaining constraints needed to understand specific actions.
+
+Target {{low}} tokens of working detail. The combined high-level and working-detail summary targets {{minimum}}–{{maximum}} tokens. Minimums are targets, not hard guarantees; do not pad or invent content.
+
+Use descriptive Markdown subheadings for completed work, current state, problems and alternatives, next steps, and exact references. Return only the working-detail section's contents, without a top-level heading.

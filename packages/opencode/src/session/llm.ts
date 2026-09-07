@@ -43,6 +43,7 @@ export type StreamInput = {
   messages: ModelMessage[]
   small?: boolean
   tools: Record<string, Tool>
+  maxOutputTokens?: number
   retries?: number
   toolChoice?: "auto" | "required" | "none"
 }

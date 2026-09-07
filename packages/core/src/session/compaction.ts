@@ -7,6 +7,8 @@ import type { EventV2 } from "../event"
 import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
+import HIGH_LEVEL from "./prompt/compaction-high.txt"
+import WORKING_DETAIL from "./prompt/compaction-low.txt"
 import { Token } from "../util/token"
 
 const DEFAULT_BUFFER = 20_000
@@ -158,14 +160,30 @@ const select = (
   }
 }
 
-export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) =>
-  [
+export const buildPrompt = (input: {
+  readonly previousSummary?: string
+  readonly context: readonly string[]
+  readonly pass?: "high" | "low"
+  readonly window?: number
+}) => {
+  const window = input.window ?? 0
+  const template = input.pass === "high" ? HIGH_LEVEL : input.pass === "low" ? WORKING_DETAIL : SUMMARY_TEMPLATE
+  return [
     input.previousSummary
-      ? `Update the anchored summary below using the conversation history above.\nPreserve still-true details, remove stale details, and merge in the new facts.\n<previous-summary>\n${input.previousSummary}\n</previous-summary>`
+      ? `Update the anchored summary below using the conversation history above.
+Preserve still-true details, remove stale details, and merge in the new facts.
+<previous-summary>
+${input.previousSummary}
+</previous-summary>`
       : "Create a new anchored summary from the conversation history.",
-    SUMMARY_TEMPLATE,
+    template
+      .replaceAll("{{high}}", String(Math.ceil(window * 0.03)))
+      .replaceAll("{{low}}", String(Math.ceil(window * 0.045)))
+      .replaceAll("{{minimum}}", String(Math.ceil(window * 0.05)))
+      .replaceAll("{{maximum}}", String(Math.floor(window * 0.1))),
     ...input.context,
   ].join("\n\n")
+}
 
 export const make = (dependencies: Dependencies) => {
   const config = settings(dependencies.config)

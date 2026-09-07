@@ -259,6 +259,7 @@ const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : no
 // Config that registers a custom "test" provider with a "test-model" model
 // so provider model lookup succeeds inside the loop.
 const cfg = {
+  model: "test/test-model",
   provider: {
     test: {
       name: "Test",
@@ -508,6 +509,7 @@ it.instance("loop calls LLM and returns assistant message", () =>
 
     const result = yield* prompt.loop({ sessionID: chat.id })
     expect(result.info.role).toBe("assistant")
+    if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
     const parts = result.parts.filter((p) => p.type === "text")
     expect(parts.some((p) => p.type === "text" && p.text === "world")).toBe(true)
     expect(yield* llm.hits).toHaveLength(1)
@@ -2399,4 +2401,90 @@ noLLMServer.instance(
       }
     }),
   30_000,
+)
+
+it.instance("compact command is registered and runs both summary passes while idle", () =>
+  Effect.gen(function* () {
+    const server = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      agent: { compaction: { model: "test/unused" } },
+    }))
+    const commands = yield* Command.Service
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    yield* seed(chat.id, { finish: "stop" })
+    expect((yield* commands.list()).some((command) => command.name === "compact")).toBe(true)
+    yield* server.llm.text("goals")
+    yield* server.llm.text("details")
+    const result = yield* prompt.command({ sessionID: chat.id, command: "compact", arguments: "" })
+    expect(result.info.role === "assistant" && result.info.summary).toBe(true)
+    expect(result.parts).toMatchObject([
+      { type: "text", text: "# High-level context\n\ngoals\n\n# Working detail\n\ndetails" },
+    ])
+    expect(yield* server.llm.hits).toHaveLength(2)
+    for (const hit of yield* server.llm.hits) {
+      expect(hit.body.model).toBe("test-model")
+      expect(hit.body.max_tokens).toBe(5000)
+    }
+  }),
+)
+
+it.instance("compact command admitted during a provider reply drains once after the reply finishes", () =>
+  Effect.gen(function* () {
+    const server = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const compact = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const release = defer<void>()
+    yield* server.llm.push(reply().wait(release.promise).text("done").stop())
+    yield* server.llm.text("goals")
+    yield* server.llm.text("details")
+    const running = yield* prompt
+      .prompt({ sessionID: chat.id, parts: [{ type: "text", text: "hello" }] })
+      .pipe(Effect.forkChild)
+    yield* server.llm.wait(1)
+    const manual = yield* prompt
+      .command({ sessionID: chat.id, command: "compact", arguments: "" })
+      .pipe(Effect.forkChild)
+    yield* pollWithTimeout(
+      Effect.gen(function* () {
+        const messages = yield* sessions.messages({ sessionID: chat.id })
+        return MessageV2.latest(messages).tasks.some((task) => task.type === "compaction") ? true : undefined
+      }),
+      "manual compaction was not admitted while busy",
+    )
+    yield* compact.create({ sessionID: chat.id, agent: "build", model: ref, auto: false })
+    expect(yield* server.llm.hits).toHaveLength(1)
+    release.resolve()
+    yield* Fiber.join(running)
+    yield* Fiber.join(manual)
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    expect(messages.flatMap((message) => message.parts).filter((part) => part.type === "compaction")).toHaveLength(1)
+    expect(messages.filter((message) => message.info.role === "assistant" && message.info.summary)).toHaveLength(1)
+    expect(MessageV2.latest(messages).tasks).toEqual([])
+    expect(yield* server.llm.hits).toHaveLength(3)
+  }),
+)
+
+it.instance("compact command coalesces with an admitted auto request and preserves continuation", () =>
+  Effect.gen(function* () {
+    const server = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const compact = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    yield* seed(chat.id, { finish: "stop" })
+    yield* compact.create({ sessionID: chat.id, agent: "build", model: ref, auto: true })
+    yield* server.llm.text("goals")
+    yield* server.llm.text("details")
+    yield* server.llm.text("continued")
+    const result = yield* prompt.command({ sessionID: chat.id, command: "compact", arguments: "" })
+    expect(result.parts.some((part) => part.type === "text" && part.text === "continued")).toBe(true)
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    expect(messages.flatMap((message) => message.parts).filter((part) => part.type === "compaction")).toHaveLength(1)
+    expect(messages.filter((message) => message.info.role === "assistant" && message.info.summary)).toHaveLength(1)
+    expect(yield* server.llm.hits).toHaveLength(3)
+  }),
 )

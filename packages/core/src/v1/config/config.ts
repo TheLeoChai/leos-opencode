@@ -154,18 +154,20 @@ export const Info = Schema.Struct({
       prune: Schema.optional(Schema.Boolean).annotate({
         description: "Enable pruning of old tool outputs (default: false)",
       }),
+      keep_threshold: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThan(1))).annotate({
+        description: "Fraction of current context tokens to retain at a user-turn boundary (default: 0.35)",
+      }),
       tail_turns: Schema.optional(NonNegativeInt).annotate({
-        description:
-          "Number of recent user turns, including their following assistant/tool responses, to keep verbatim during compaction (default: 2)",
+        description: "Deprecated; retention now uses keep_threshold",
       }),
       preserve_recent_tokens: Schema.optional(NonNegativeInt).annotate({
-        description: "Maximum number of tokens from recent turns to preserve verbatim after compaction",
+        description: "Deprecated; retention now uses keep_threshold",
       }),
       threshold: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1))).annotate({
-        description: "Fraction of usable context that triggers automatic compaction (default: 0.7)",
+        description: "Fraction of usable context that triggers automatic compaction (default: 0.75)",
       }),
       target: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1))).annotate({
-        description: "Fraction of usable context to retain verbatim after proactive compaction (default: 0.45)",
+        description: "Deprecated; retention now uses keep_threshold",
       }),
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",

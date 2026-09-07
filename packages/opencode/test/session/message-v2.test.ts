@@ -1660,3 +1660,27 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
   })
 })
+
+test("compaction admitted during a reply remains pending and replays that reply after the retained user", () => {
+  const user: SessionV1.WithParts = { info: userInfo("msg_001"), parts: [] }
+  const marker: SessionV1.WithParts = {
+    info: userInfo("msg_002"),
+    parts: [{ ...basePart("msg_002", "p1"), type: "compaction", auto: false, tail_start_id: user.info.id }],
+  }
+  const reply: SessionV1.WithParts = { info: { ...assistantInfo("msg_003", "msg_001"), finish: "stop" }, parts: [] }
+  expect(MessageV2.latest([user, marker, reply]).tasks).toMatchObject([
+    { type: "compaction", messageID: marker.info.id, auto: false },
+  ])
+  const summary: SessionV1.WithParts = {
+    info: { ...assistantInfo("msg_004", "msg_002"), summary: true, finish: "stop" },
+    parts: [],
+  }
+  const filtered = MessageV2.filterCompacted([summary, reply, marker, user])
+  expect(filtered.map((message) => message.info.id)).toEqual([
+    marker.info.id,
+    summary.info.id,
+    user.info.id,
+    reply.info.id,
+  ])
+  expect(MessageV2.latest(filtered).tasks).toEqual([])
+})

@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import fs from "fs/promises"
@@ -19,7 +20,14 @@ import { ModelV2 } from "@opencode-ai/core/model"
 
 const it = testEffect(
   LayerNode.compile(
-    LayerNode.group([Session.node, SessionRevert.node, Snapshot.node, SessionProjector.node, CrossSpawnSpawner.node]),
+    LayerNode.group([
+      Session.node,
+      SessionRevert.node,
+      Snapshot.node,
+      SessionProjector.node,
+      CrossSpawnSpawner.node,
+      Database.node,
+    ]),
   ),
 )
 
@@ -681,3 +689,44 @@ describe("revert + compact workflow", () => {
     ),
   )
 })
+
+it.live(
+  "reverting a canonical summary restores its head and retained tool turn",
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
+        const revert = yield* SessionRevert.Service
+        const chat = yield* session.create({})
+        const head = yield* user(chat.id)
+        yield* text(chat.id, head.id, "old context")
+        const tail = yield* user(chat.id)
+        yield* text(chat.id, tail.id, "retained request")
+        const response = yield* assistant(chat.id, tail.id, dir)
+        yield* tool(chat.id, response.id)
+        const marker = yield* user(chat.id)
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: chat.id,
+          messageID: marker.id,
+          type: "compaction",
+          auto: false,
+          tail_start_id: tail.id,
+        })
+        const canonical = yield* assistant(chat.id, marker.id, dir)
+        yield* session.updateMessage({ ...canonical, summary: true })
+        yield* text(chat.id, canonical.id, "# High-level context\n\ngoals\n\n# Working detail\n\ndetails")
+        const compacted = MessageV2.filterCompacted(yield* MessageV2.stream(chat.id))
+        expect(compacted.map((message) => message.info.id)).toEqual([marker.id, canonical.id, tail.id, response.id])
+        yield* revert.revert({ sessionID: chat.id, messageID: marker.id })
+        yield* revert.cleanup(yield* session.get(chat.id))
+        const restored = MessageV2.filterCompacted(yield* MessageV2.stream(chat.id))
+        expect(restored.map((message) => message.info.id)).toEqual([head.id, tail.id, response.id])
+        expect(restored.at(-1)?.parts.some((part) => part.type === "tool" && part.state.status === "completed")).toBe(
+          true,
+        )
+        yield* session.remove(chat.id)
+      }),
+    { git: true },
+  ),
+)

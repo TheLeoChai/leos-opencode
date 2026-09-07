@@ -1,0 +1,7 @@
+Extract the enduring high-level context needed to continue this conversation: the user's goals, principles, rules, decisions, constraints, and preferences. Do not continue the task or answer questions in the transcript.
+
+Reconcile the previous canonical summary with the frozen transcript. Preserve still-valid rules and their exact qualifications. Explicitly mark superseded decisions and their replacements when that distinction matters; otherwise drop obsolete decisions. Do not silently carry conflicting decisions forward. Distinguish user requirements from assistant suggestions and inferences. Preserve the user's wording closely, especially boundaries and prohibitions.
+
+Target at least {{high}} tokens of useful high-level context, within a combined summary target of {{minimum}}–{{maximum}} tokens. These are targets, not reasons to invent content or repeat yourself. The working-detail pass is generated separately from the same transcript.
+
+Use descriptive Markdown subheadings for goals, rules and preferences, decisions, and constraints. Return only the high-level section's contents, without a top-level heading.

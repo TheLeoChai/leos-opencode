@@ -59,6 +59,7 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
       },
       buffer: info.compaction.reserved,
       threshold: info.compaction.threshold,
+      keep_threshold: info.compaction.keep_threshold,
       target: info.compaction.target,
     },
     skills: info.skills && [...(info.skills.paths ?? []), ...(info.skills.urls ?? [])],

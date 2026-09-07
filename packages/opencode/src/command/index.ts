@@ -44,6 +44,7 @@ export function hints(template: string) {
 }
 
 export const Default = {
+  COMPACT: "compact",
   INIT: "init",
   REVIEW: "review",
 } as const
@@ -67,6 +68,13 @@ const layer = Layer.effect(
       const bridge = yield* EffectBridge.make()
       const commands: Record<string, Info> = {}
 
+      commands[Default.COMPACT] = {
+        name: Default.COMPACT,
+        description: "compact the session while retaining recent context",
+        source: "command",
+        template: "",
+        hints: [],
+      }
       commands[Default.INIT] = {
         name: Default.INIT,
         description: "guided AGENTS.md setup",

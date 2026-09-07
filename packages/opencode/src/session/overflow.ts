@@ -6,7 +6,7 @@ import { ProviderTransform } from "@/provider/transform"
 import type { MessageV2 } from "./message-v2"
 
 const COMPACTION_BUFFER = 20_000
-const DEFAULT_COMPACTION_THRESHOLD = 0.7
+const DEFAULT_COMPACTION_THRESHOLD = 0.75
 
 export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
   const context = input.model.limit.context
@@ -34,3 +34,5 @@ export function isOverflow(input: {
   const threshold = input.cfg.compaction?.threshold ?? DEFAULT_COMPACTION_THRESHOLD
   return count >= usable(input) * threshold
 }
+
+export * as SessionOverflow from "./overflow"

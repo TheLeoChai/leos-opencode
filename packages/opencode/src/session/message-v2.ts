@@ -563,8 +563,9 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
   if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
     return [
-      ...result.slice(compactionIndex, summaryIndex + 1),
-      ...result.slice(tailIndex, compactionIndex),
+      compaction,
+      result[summaryIndex],
+      ...result.slice(tailIndex, summaryIndex).filter((msg) => msg !== compaction),
       ...result.slice(summaryIndex + 1),
     ]
   }
@@ -592,10 +593,18 @@ export function latest(msgs: WithParts[]) {
     if (info.role === "assistant" && (!assistant || info.id > assistant.id)) assistant = info
     if (info.role === "assistant" && info.finish && (!finished || info.id > finished.id)) finished = info
   }
-  const tasks = msgs.flatMap((m) =>
-    finished && m.info.id <= finished.id
-      ? []
-      : m.parts.filter((p): p is CompactionPart | SubtaskPart => p.type === "compaction" || p.type === "subtask"),
+  const processed = new Set(
+    msgs.flatMap((message) =>
+      message.info.role === "assistant" && message.info.summary && message.info.finish ? [message.info.parentID] : [],
+    ),
+  )
+  const tasks = msgs.flatMap((message) =>
+    message.parts.filter((part): part is CompactionPart | SubtaskPart => {
+      // A task admitted while an assistant is streaming can precede its finished
+      // response. Compaction is consumed by its own summary, not an unrelated reply.
+      if (part.type === "compaction") return !processed.has(message.info.id)
+      return part.type === "subtask" && (!finished || message.info.id > finished.id)
+    }),
   )
   return { user, assistant, finished, tasks }
 }

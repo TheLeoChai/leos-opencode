@@ -1109,6 +1109,7 @@ const layer = Layer.effect(
             ) ?? false
 
           if (
+            tasks.length === 0 &&
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
@@ -1149,9 +1150,10 @@ const layer = Layer.effect(
           if (task?.type === "compaction") {
             const result = yield* compaction.process({
               messages: msgs,
-              parentID: lastUser.id,
+              parentID: task.messageID,
               sessionID,
-              auto: task.auto,
+              auto:
+                task.auto || hasToolCalls || !!(lastAssistant && !lastAssistant.finish) || lastUser.id > task.messageID,
               overflow: task.overflow,
             })
             if (result === "stop") break
@@ -1331,7 +1333,10 @@ const layer = Layer.effect(
             Effect.ensuring(instruction.clear(handle.message.id)),
             Effect.onInterrupt(() => finalizeInterruptedAssistant),
           )
-          if (outcome === "break") break
+          if (outcome === "break") {
+            const pending = yield* sessions.messages({ sessionID }).pipe(Effect.orDie)
+            if (MessageV2.latest(pending).tasks.length === 0) break
+          }
           continue
         }
 
@@ -1359,6 +1364,20 @@ const layer = Layer.effect(
         command: input.command,
         agent: input.agent,
       })
+      if (input.command === Command.Default.COMPACT) {
+        yield* revert.cleanup(yield* sessions.get(input.sessionID).pipe(Effect.orDie))
+        const messages = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
+        yield* compaction.create({
+          sessionID: input.sessionID,
+          agent:
+            input.agent ??
+            messages.findLast((message) => message.info.role === "user")?.info.agent ??
+            (yield* agents.defaultAgent()),
+          model: input.model ? Provider.parseModel(input.model) : yield* currentModel(input.sessionID),
+          auto: false,
+        })
+        return yield* loop({ sessionID: input.sessionID })
+      }
       const cmd = yield* commands.get(input.command)
       if (!cmd) {
         const available = (yield* commands.list()).map((c) => c.name)
